@@ -4,7 +4,7 @@
 ; All paths are relative to this file, so the script works from any location.
 
 #define MyAppName "SeewoKiller"
-#define MyAppVersion "3.0.0"
+#define MyAppVersion "4.0.0"
 #define MyAppPublisher "SeewoKiller"
 #define MyAppExeName "SeewoKiller.exe"
 
@@ -18,7 +18,7 @@ DefaultDirName={userpf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=installer
-OutputBaseFilename=SeewoKiller-v3-Setup
+OutputBaseFilename=SeewoKiller-v4-Setup
 SetupIconFile=res\app.ico
 LicenseFile=LICENSE.rtf
 Compression=lzma2/ultra64
@@ -28,7 +28,9 @@ UninstallDisplayName={#MyAppName} {#MyAppVersion}
 DisableProgramGroupPage=yes
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; ChineseSimplified.isl is an unofficial translation not bundled with Inno Setup.
+; Drop it into "compiler:Languages\" and re-enable:
+; Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
@@ -38,13 +40,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Main executable
 Source: "build\Release\SeewoKiller.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; Resident agent (must sit next to the console for 一键部署)
+Source: "build\Release\skagent.exe"; DestDir: "{app}"; Flags: ignoreversion
+
 ; Runtime DLLs
 Source: "build\Release\ssh.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Release\WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Release\Microsoft.Web.WebView2.Core.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Release\libcrypto-3-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Release\libssl-3-x64.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Release\zlib1.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 ; VC++ runtime DLLs (for systems without vc_redist installed)
 Source: "installer\vcredist_dlls\MSVCP140.dll"; DestDir: "{app}"; Flags: ignoreversion

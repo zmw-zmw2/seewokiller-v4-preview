@@ -1,19 +1,7 @@
-# Build output
-/build/
-/build_old_migrated/
-
-# Logs
+build/
 debug.log
-
-# Installer packaging (recreatable from old project)
-/installer/
-
-# IDE / user files
-.vs/
-*.user
-*.suo
-
-# CMake
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
+key.bin
+installer/*.exe
+*.obj
+*.pdb
+build_old_migrated/

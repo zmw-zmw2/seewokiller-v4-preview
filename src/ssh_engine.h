@@ -85,6 +85,12 @@ public:
 
     void stopLoop();
 
+    // Blocking one-shot batch execute on the calling thread (deploy chains).
+    void executeNow(const std::vector<std::string>& ipList,
+                    const std::string& username,
+                    const std::string& password,
+                    const std::string& command);
+
     void setOutputCallback(OutputCallback cb) { m_outputCb = cb; }
     void setProgressCallback(ProgressCallback cb) { m_progressCb = cb; }
     void setCompleteCallback(CompleteCallback cb) { m_completeCb = cb; }

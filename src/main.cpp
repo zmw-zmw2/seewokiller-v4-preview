@@ -19,6 +19,9 @@
 #include "vnc_viewer.h"
 #include "commands.h"
 #include "plugin_loader.h"
+#include "sk_protocol.h"
+#include "mcast_ctrl.h"
+#include "selfprotect.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "kernel32.lib")
@@ -58,6 +61,12 @@ const COLORREF CLR_BTN_TEXT_DK = RGB(35, 38, 48);         // silver-white button
 #define IDC_EDIT_SCP_REMOTE 2018
 #define IDC_BTN_SCP_PUSH   2019
 #define IDC_BTN_SCP_PULL   2020
+#define IDC_BTN_AGENT_DEPLOY  2024
+#define IDC_BTN_AGENT_PING    2025
+#define IDC_CMB_AGENT_ACTION  2026
+#define IDC_EDIT_AGENT_PARAM  2027
+#define IDC_BTN_AGENT_SEND    2028
+#define IDC_BTN_SCP_RUN       2029
 
 // Plugin buttons start at 3000. Reserve a wide range; plugin index is
 // (id - PLUGIN_BTN_BASE).
@@ -66,6 +75,9 @@ const COLORREF CLR_BTN_TEXT_DK = RGB(35, 38, 48);         // silver-white button
 // ==================== Custom Messages ====================
 #define WM_UPDATE_OUTPUT   (WM_USER + 100)
 #define WM_UPDATE_PROGRESS (WM_USER + 101)
+#define WM_MCAST_REPLY     (WM_USER + 102)
+#define WM_MCAST_DONE      (WM_USER + 103)
+#define WM_SELFPROTECT     (WM_USER + 104)
 
 // ==================== Context Menu IDs ====================
 #define IDM_CUT       3101
@@ -91,6 +103,7 @@ static HWND g_hTab = nullptr;
 // Controls placed inside each tab page. Used to show/hide on tab switch.
 static std::vector<HWND> g_cmdTabControls;
 static std::vector<HWND> g_scpTabControls;
+static std::vector<HWND> g_agentTabControls;
 
 static std::unique_ptr<BatchSSHExecutor> g_sshExecutor;
 static std::unique_ptr<VNCProxy> g_vncProxy;
@@ -98,6 +111,14 @@ static std::unique_ptr<HttpFileServer> g_httpServer;
 static std::vector<std::unique_ptr<VNCViewerWindow>> g_vncWindows;
 static std::string g_resDir;
 static std::vector<Plugin> g_plugins;
+
+// Agent 分发
+static HWND g_hBtnAgentDeploy, g_hLblAgentOnline, g_hBtnAgentPing;
+static HWND g_hCmbAgentAction, g_hEditAgentParam, g_hBtnAgentSend, g_hBtnScpRun;
+static int g_yAgentRow = 0;
+static uint8_t g_agentKey[SK_HMAC_LEN] = {0};
+static std::string g_keyPath, g_agentExePath;
+static McastController g_mcast;
 
 // ==================== Layout geometry ====================
 // Consistent grid + spacing used by WM_CREATE / WM_SIZE.
@@ -179,13 +200,9 @@ static void ShowControls(const std::vector<HWND>& controls, int showCmd) {
 }
 
 static void SwitchTab(int idx) {
-    if (idx == 0) {
-        ShowControls(g_cmdTabControls, SW_SHOW);
-        ShowControls(g_scpTabControls, SW_HIDE);
-    } else {
-        ShowControls(g_cmdTabControls, SW_HIDE);
-        ShowControls(g_scpTabControls, SW_SHOW);
-    }
+    ShowControls(g_cmdTabControls, idx == 0 ? SW_SHOW : SW_HIDE);
+    ShowControls(g_scpTabControls, idx == 1 ? SW_SHOW : SW_HIDE);
+    ShowControls(g_agentTabControls, idx == 2 ? SW_SHOW : SW_HIDE);
 }
 
 static LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
@@ -225,6 +242,45 @@ static LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
         break;
     }
     return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+// ==================== Agent / misc helpers ====================
+static void AppendOutput(const std::string& text) {
+    if (!g_hMainWnd) return;
+    OutputData* pData = new OutputData{text};
+    SendMessageW(g_hMainWnd, WM_UPDATE_OUTPUT, 0, (LPARAM)pData);
+}
+
+static std::string GetLocalIpForMulticast() {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return "0.0.0.0";
+    sockaddr_in g{};
+    g.sin_family = AF_INET;
+    g.sin_addr.s_addr = inet_addr(SK_MCAST_GROUP);
+    g.sin_port = htons(SK_MCAST_PORT);
+    std::string ip = "0.0.0.0";
+    if (connect(s, (sockaddr*)&g, sizeof(g)) == 0) {
+        sockaddr_in me;
+        int l = sizeof(me);
+        if (getsockname(s, (sockaddr*)&me, &l) == 0)
+            ip = inet_ntoa(me.sin_addr);
+    }
+    closesocket(s);
+    return ip;
+}
+
+static std::string JsonEscStr(const std::string& in) {
+    char buf[4096];
+    if (sk_json_escape(in.c_str(), buf, sizeof(buf)) != 0) return "";
+    return buf;
+}
+
+static std::string BuildScpRunCommand(const std::string& remoteFull) {
+    std::string win = remoteFull;
+    for (auto& c : win) if (c == '/') c = '\\';
+    std::string tr = (win.find(' ') == std::string::npos) ? win : "\"" + win + "\"";
+    return "schtasks /Create /F /TN SKRun /TR " + tr +
+           " /SC ONCE /ST 00:00 /RL HIGHEST /IT & schtasks /Run /TN SKRun";
 }
 
 // ==================== Main Window Proc ====================
@@ -331,12 +387,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // === Mode Tab Control ===
         g_yTab = y;
-        const int TAB_H = 230;  // enough for the larger "Command" tab content
+        const int TAB_H = 270;  // enough for the larger "Command" tab content
         g_hTab = CreateWindowW(WC_TABCONTROLW, L"",
             WS_VISIBLE | WS_CHILD | TCS_OWNERDRAWFIXED | TCS_TABS,
             M, y, W, TAB_H, hwnd, (HMENU)IDC_TAB_MAIN, GetModuleHandle(nullptr), nullptr);
         SendMessage(g_hTab, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
-        TabCtrl_SetItemSize(g_hTab, (W - 4) / 2, 28);
+        TabCtrl_SetItemSize(g_hTab, (W - 6) / 3, 28);
         SetWindowSubclass(g_hTab, TabSubclassProc, 0, 0);
 
         // Use the explicit Unicode message to avoid ANSI/Unicode macro confusion.
@@ -345,6 +401,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tci);
         tci.pszText = (LPWSTR)L"\u6587\u4ef6\u4f20\u8f93";
         SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tci);
+        tci.pszText = (LPWSTR)L"Agent\u5206\u53d1";
+        SendMessageW(g_hTab, TCM_INSERTITEMW, 2, (LPARAM)&tci);
 
         // Compute tab content area in parent coordinates.
         RECT tcRc;
@@ -435,23 +493,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_scpTabControls.push_back(hLbl);
 
             scy += 24;
-            g_hEditScpRemote = CreateWindowW(L"EDIT", L"C:/Temp/payload.txt",
+            g_hEditScpRemote = CreateWindowW(L"EDIT", L"C:/Users/seewo/Desktop/",
                 WS_VISIBLE | WS_CHILD | WS_BORDER | ES_LEFT | ES_AUTOHSCROLL,
-                cx, scy, contentW - 198, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_EDIT_SCP_REMOTE,
+                cx, scy, contentW - 310, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_EDIT_SCP_REMOTE,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(g_hEditScpRemote, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
             g_scpTabControls.push_back(g_hEditScpRemote);
             g_yScpRemote = scy;
             g_hBtnScpPush = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20\u5230\u5168\u90e8",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                cx + contentW - 196, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PUSH,
+                cx + contentW - 306, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PUSH,
                 GetModuleHandle(nullptr), nullptr);
             g_scpTabControls.push_back(g_hBtnScpPush);
             g_hBtnScpPull = CreateWindowW(L"BUTTON", L"\u4ece\u9996\u53f0\u62c9\u53d6",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                cx + contentW - 90, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PULL,
+                cx + contentW - 206, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PULL,
                 GetModuleHandle(nullptr), nullptr);
             g_scpTabControls.push_back(g_hBtnScpPull);
+            g_hBtnScpRun = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20\u5e76\u8fd0\u884c",
+                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+                cx + contentW - 106, scy, 100, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_RUN,
+                GetModuleHandle(nullptr), nullptr);
+            g_scpTabControls.push_back(g_hBtnScpRun);
 
             scy += LAYOUT_INPUT_H + 8;
             hLbl = CreateWindowW(L"STATIC", L"\u62c9\u53d6\uff1a\u4efb\u610f\u4e00\u53f0\u6210\u529f\u5373\u505c\u6b62",
@@ -459,6 +522,87 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
             g_scpTabControls.push_back(hLbl);
+        }
+
+        // === Agent Tab Content (initially hidden) ===
+        {
+            g_yAgentRow = contentY;
+            int ay = contentY + 6;
+            g_hBtnAgentDeploy = CreateWindowW(L"BUTTON", L"\u4e00\u952e\u90e8\u7f72\u5230\u5168\u90e8",
+                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+                cx, ay, 150, 34, hwnd, (HMENU)IDC_BTN_AGENT_DEPLOY,
+                GetModuleHandle(nullptr), nullptr);
+            g_agentTabControls.push_back(g_hBtnAgentDeploy);
+
+            g_hLblAgentOnline = CreateWindowW(L"STATIC", L"\u5728\u7ebf: --",
+                WS_VISIBLE | WS_CHILD, cx + 170, ay + 8, 120, 20, hwnd, nullptr,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(g_hLblAgentOnline, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            g_agentTabControls.push_back(g_hLblAgentOnline);
+
+            g_hBtnAgentPing = CreateWindowW(L"BUTTON", L"\u5237\u65b0\u5728\u7ebf",
+                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+                cx + 300, ay, 100, 30, hwnd, (HMENU)IDC_BTN_AGENT_PING,
+                GetModuleHandle(nullptr), nullptr);
+            g_agentTabControls.push_back(g_hBtnAgentPing);
+
+            ay = contentY + 50;
+            HWND hLbl = CreateWindowW(L"STATIC", L"\u52a8\u4f5c",
+                WS_VISIBLE | WS_CHILD, cx, ay + 6, 42, 20, hwnd, nullptr,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
+            g_agentTabControls.push_back(hLbl);
+
+            g_hCmbAgentAction = CreateWindowW(L"COMBOBOX", nullptr,
+                WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+                cx + 46, ay, 150, 300, hwnd, (HMENU)IDC_CMB_AGENT_ACTION,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(g_hCmbAgentAction, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
+            {
+                const wchar_t* items[] = {
+                    L"exec \u6267\u884c\u547d\u4ee4",
+                    L"exec_wait \u53d6\u7ed3\u679c",
+                    L"killgames \u6740\u6e38\u620f",
+                    L"msg \u5f39\u516c\u544a",
+                    L"open_url \u5f00\u7f51\u9875",
+                    L"power \u5173\u673a",
+                    L"power \u91cd\u542f",
+                    L"power \u6ce8\u9500",
+                    L"power \u9501\u5c4f",
+                    L"isolate \u7f51\u7edc\u9694\u79bb",
+                    L"unisolate \u89e3\u9664\u9694\u79bb"
+                };
+                for (const wchar_t* it : items)
+                    SendMessageW(g_hCmbAgentAction, CB_ADDSTRING, 0, (LPARAM)it);
+                SendMessageW(g_hCmbAgentAction, CB_SETCURSEL, 0, 0);
+            }
+            g_agentTabControls.push_back(g_hCmbAgentAction);
+
+            hLbl = CreateWindowW(L"STATIC", L"\u53c2\u6570",
+                WS_VISIBLE | WS_CHILD, cx + 206, ay + 6, 40, 20, hwnd, nullptr,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
+            g_agentTabControls.push_back(hLbl);
+
+            g_hEditAgentParam = CreateWindowW(L"EDIT", L"notepad.exe",
+                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_LEFT | ES_AUTOHSCROLL,
+                cx + 250, ay, contentW - 332, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_EDIT_AGENT_PARAM,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(g_hEditAgentParam, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+            g_agentTabControls.push_back(g_hEditAgentParam);
+
+            g_hBtnAgentSend = CreateWindowW(L"BUTTON", L"\u53d1\u9001",
+                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+                cx + contentW - 74, ay, 74, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_AGENT_SEND,
+                GetModuleHandle(nullptr), nullptr);
+            g_agentTabControls.push_back(g_hBtnAgentSend);
+
+            hLbl = CreateWindowW(L"STATIC",
+                L"\u53c2\u6570: exec/exec_wait=\u547d\u4ee4, msg=\u6587\u5b57, open_url=\u7f51\u5740, \u5176\u4f59\u7559\u7a7a; \u56de\u6267\u663e\u793a\u5728\u4e0b\u65b9\u8f93\u51fa\u533a",
+                WS_VISIBLE | WS_CHILD, cx, contentY + 92, contentW, 18, hwnd, nullptr,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+            g_agentTabControls.push_back(hLbl);
         }
 
         // Show the active tab, hide the other.
@@ -762,6 +906,153 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // --- Agent 分发：一键部署 ---
+        if (id == IDC_BTN_AGENT_DEPLOY) {
+            if (g_sshExecutor && g_sshExecutor->isRunning()) {
+                MessageBoxW(hwnd, L"\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u5148\u505c\u6b62\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string ipStr = getEditText(g_hEditIP);
+            auto ips = ParseIPList(ipStr);
+            if (ips.empty()) {
+                MessageBoxW(hwnd, L"\u672a\u89e3\u6790\u5230\u6709\u6548IP\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string username = getEditText(g_hEditUser);
+            std::string password = getEditText(g_hEditPassword);
+            if (username.empty()) {
+                MessageBoxW(hwnd, L"\u8bf7\u8f93\u5165\u7528\u6237\u540d\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::error_code ec;
+            if (!std::filesystem::exists(g_agentExePath, ec)) {
+                MessageBoxW(hwnd, L"\u672a\u627e\u5230 skagent.exe(\u5e94\u4e0e\u4e3b\u7a0b\u5e8f\u540c\u76ee\u5f55)",
+                            L"\u9519\u8bef", MB_ICONERROR);
+                return 0;
+            }
+
+            SetWindowTextW(g_hEditOutput, L"");
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            WriteLog("Agent deploy 1/3: dirs + firewall");
+            AppendOutput("=== Agent \u90e8\u7f72 1/3: \u521b\u5efa\u76ee\u5f55 + \u9632\u706b\u5899\u653e\u884c ===\r\n");
+            g_sshExecutor->executeNow(ips, username, password,
+                "md C:\\Temp\\SK >nul 2>&1 & "
+                "netsh advfirewall firewall delete rule name=SKAgentIn >nul 2>&1 & "
+                "netsh advfirewall firewall add rule name=SKAgentIn dir=in action=allow program=C:\\Temp\\SK\\skagent.exe & "
+                "netsh advfirewall firewall add rule name=SKAgentUDP dir=in action=allow protocol=UDP localport=47381");
+
+            WriteLog("Agent deploy 2/3: push agent + key");
+            AppendOutput("=== Agent \u90e8\u7f72 2/3: \u63a8\u9001 skagent.exe + key.bin ===\r\n");
+            g_sshExecutor->executeScpPush(ips, username, password, g_agentExePath, "C:/Temp/SK/skagent.exe");
+            g_sshExecutor->executeScpPush(ips, username, password, g_keyPath, "C:/Temp/SK/key.bin");
+
+            WriteLog("Agent deploy 3/3: schtasks ONLOGON HIGHEST + run");
+            AppendOutput("=== Agent \u90e8\u7f72 3/3: \u6ce8\u518c ONLOGON \u4efb\u52a1(HIGHEST) \u5e76\u542f\u52a8 ===\r\n");
+            g_sshExecutor->executeNow(ips, username, password,
+                "schtasks /Create /F /TN SeewoAgent /TR C:\\Temp\\SK\\skagent.exe /SC ONLOGON /RL HIGHEST /IT & "
+                "schtasks /Run /TN SeewoAgent");
+
+            AppendOutput("=== \u90e8\u7f72\u5b8c\u6210, \u70b9\u51fb [\u5237\u65b0\u5728\u7ebf] \u9a8c\u8bc1 ===\r\n");
+            return 0;
+        }
+
+        // --- Agent：刷新在线 / 组播发送 ---
+        if (id == IDC_BTN_AGENT_PING || id == IDC_BTN_AGENT_SEND) {
+            if (g_mcast.busy()) {
+                MessageBoxW(hwnd, L"\u4e0a\u4e00\u8f6e\u56de\u6536\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u5019...", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string body;
+            if (id == IDC_BTN_AGENT_PING) {
+                body = "\"action\":\"ping\"";
+            } else {
+                int sel = (int)SendMessageW(g_hCmbAgentAction, CB_GETCURSEL, 0, 0);
+                std::string param = getEditText(g_hEditAgentParam);
+                std::string esc = JsonEscStr(param);
+                auto needParam = [&]() {
+                    if (param.empty()) {
+                        MessageBoxW(hwnd, L"\u8be5\u52a8\u4f5c\u9700\u8981\u53c2\u6570\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                        return true;
+                    }
+                    return false;
+                };
+                switch (sel) {
+                case 0:  if (needParam()) return 0; body = "\"action\":\"exec\",\"cmd\":\"" + esc + "\""; break;
+                case 1:  if (needParam()) return 0; body = "\"action\":\"exec_wait\",\"cmd\":\"" + esc + "\""; break;
+                case 2:  body = "\"action\":\"killgames\""; break;
+                case 3:  if (needParam()) return 0; body = "\"action\":\"msg\",\"text\":\"" + esc + "\""; break;
+                case 4:  if (needParam()) return 0; body = "\"action\":\"open_url\",\"url\":\"" + esc + "\""; break;
+                case 5:  body = "\"action\":\"power\",\"mode\":\"off\""; break;
+                case 6:  body = "\"action\":\"power\",\"mode\":\"reboot\""; break;
+                case 7:  body = "\"action\":\"power\",\"mode\":\"logoff\""; break;
+                case 8:  body = "\"action\":\"power\",\"mode\":\"lock\""; break;
+                case 9:  body = "\"action\":\"isolate\",\"allow_ip\":\"" + GetLocalIpForMulticast() + "\""; break;
+                case 10: body = "\"action\":\"unisolate\""; break;
+                default: body = "\"action\":\"ping\""; break;
+                }
+            }
+            bool ok = g_mcast.start(body, 2500,
+                [](const McastReply& r) {
+                    auto* p = new McastReply(r);
+                    PostMessage(g_hMainWnd, WM_MCAST_REPLY, 0, (LPARAM)p);
+                },
+                [](int total) {
+                    PostMessage(g_hMainWnd, WM_MCAST_DONE, (WPARAM)total, 0);
+                });
+            if (!ok) {
+                MessageBoxW(hwnd, L"\u53d1\u9001\u5931\u8d25(\u5957\u63a5\u5b57\u521b\u5efa/\u5fd9)", L"\u9519\u8bef", MB_ICONERROR);
+                return 0;
+            }
+            AppendOutput("=== \u7ec4\u64ad\u5df2\u53d1\u9001: " + body + " | \u56de\u6536 2.5s ===\r\n");
+            return 0;
+        }
+
+        // --- 上传并运行（SFTP 推送 + schtasks 在桌面会话启动）---
+        if (id == IDC_BTN_SCP_RUN) {
+            if (g_sshExecutor && g_sshExecutor->isRunning()) {
+                MessageBoxW(hwnd, L"\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u5148\u505c\u6b62\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string ipStr = getEditText(g_hEditIP);
+            auto ips = ParseIPList(ipStr);
+            if (ips.empty()) {
+                MessageBoxW(hwnd, L"\u672a\u89e3\u6790\u5230\u6709\u6548IP\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string username = getEditText(g_hEditUser);
+            std::string password = getEditText(g_hEditPassword);
+            if (username.empty()) {
+                MessageBoxW(hwnd, L"\u8bf7\u8f93\u5165\u7528\u6237\u540d\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            wchar_t wlocal[MAX_PATH] = {0};
+            GetWindowTextW(g_hEditScpLocal, wlocal, MAX_PATH);
+            std::string localPath = WstringToGbk(wlocal);
+            std::string remotePath = getEditText(g_hEditScpRemote);
+            if (localPath.empty() || remotePath.empty()) {
+                MessageBoxW(hwnd, L"\u8bf7\u8f93\u5165\u672c\u5730\u8def\u5f84\u548c\u8fdc\u7a0b\u8def\u5f84\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::error_code ec;
+            if (!std::filesystem::exists(localPath, ec)) {
+                MessageBoxW(hwnd, L"\u672c\u5730\u6587\u4ef6\u4e0d\u5b58\u5728\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string target = remotePath;
+            if (!target.empty() && (target.back() == '/' || target.back() == '\\')) {
+                auto pos = localPath.find_last_of("/\\");
+                target += (pos == std::string::npos) ? localPath : localPath.substr(pos + 1);
+            }
+
+            SetWindowTextW(g_hEditOutput, L"");
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 1/2: SFTP \u63a8\u9001 ===\r\n");
+            g_sshExecutor->executeScpPush(ips, username, password, localPath, target);
+            AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 2/2: schtasks \u5728\u684c\u9762\u4f1a\u8bdd\u542f\u52a8 ===\r\n");
+            g_sshExecutor->executeNow(ips, username, password, BuildScpRunCommand(target));
+            return 0;
+        }
+
         if (id == IDC_BTN_EXECUTE) {
             WriteLog("Execute button clicked");
 
@@ -845,6 +1136,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_MCAST_REPLY: {
+        McastReply* r = reinterpret_cast<McastReply*>(lParam);
+        if (r) {
+            std::string line = "[\u56de\u6267] " + r->ip + " " + r->host + " st=" + r->st +
+                               " rc=" + std::to_string(r->rc) + " " + r->info + "\r\n";
+            OutputData* d = new OutputData{line};
+            SendMessageW(hwnd, WM_UPDATE_OUTPUT, 0, (LPARAM)d);
+            delete r;
+        }
+        return 0;
+    }
+
+    case WM_MCAST_DONE: {
+        int total = (int)wParam;
+        if (g_hLblAgentOnline) {
+            std::wstring t = L"\u5728\u7ebf: " + std::to_wstring(total);
+            SetWindowTextW(g_hLblAgentOnline, t.c_str());
+        }
+        OutputData* d = new OutputData{"\u2014\u2014 \u56de\u6536\u5b8c\u6210: " + std::to_string(total) +
+                                       " \u53f0\u5e94\u7b54 \u2014\u2014\r\n"};
+        SendMessageW(hwnd, WM_UPDATE_OUTPUT, 0, (LPARAM)d);
+        return 0;
+    }
+
+    case WM_SELFPROTECT: {
+        std::string* s = reinterpret_cast<std::string*>(lParam);
+        if (s) {
+            OutputData* d = new OutputData{"=== \u542f\u52a8\u81ea\u9632\u62a4 ===\r\n" + *s};
+            SendMessageW(hwnd, WM_UPDATE_OUTPUT, 0, (LPARAM)d);
+            delete s;
+        }
+        return 0;
+    }
+
     case WM_GETMINMAXINFO: {
         LPMINMAXINFO mmi = (LPMINMAXINFO)lParam;
         mmi->ptMinTrackSize.x = 720;
@@ -865,7 +1190,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         if (g_hTab) {
             SetWindowPos(g_hTab, nullptr, M, g_yTab, W, 230, SWP_NOZORDER);
-            TabCtrl_SetItemSize(g_hTab, (W - 4) / 2, 28);
+            TabCtrl_SetItemSize(g_hTab, (W - 6) / 3, 28);
 
             // Recompute tab content area after horizontal resize.
             RECT tcRc;
@@ -884,11 +1209,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_hBtnScpBrowse)
                 SetWindowPos(g_hBtnScpBrowse, nullptr, cx + cw - 90, g_yScpLocal, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
             if (g_hEditScpRemote)
-                SetWindowPos(g_hEditScpRemote, nullptr, cx, g_yScpRemote, cw - 198, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hEditScpRemote, nullptr, cx, g_yScpRemote, cw - 310, LAYOUT_INPUT_H, SWP_NOZORDER);
             if (g_hBtnScpPush)
-                SetWindowPos(g_hBtnScpPush, nullptr, cx + cw - 196, g_yScpRemote, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnScpPush, nullptr, cx + cw - 306, g_yScpRemote, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
             if (g_hBtnScpPull)
-                SetWindowPos(g_hBtnScpPull, nullptr, cx + cw - 90, g_yScpRemote, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnScpPull, nullptr, cx + cw - 206, g_yScpRemote, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
+            if (g_hBtnScpRun)
+                SetWindowPos(g_hBtnScpRun, nullptr, cx + cw - 106, g_yScpRemote, 100, LAYOUT_INPUT_H, SWP_NOZORDER);
+
+            if (g_hCmbAgentAction)
+                SetWindowPos(g_hCmbAgentAction, nullptr, cx + 46, g_yAgentRow + 50, 150, 300, SWP_NOZORDER);
+            if (g_hEditAgentParam)
+                SetWindowPos(g_hEditAgentParam, nullptr, cx + 250, g_yAgentRow + 50, cw - 332, LAYOUT_INPUT_H, SWP_NOZORDER);
+            if (g_hBtnAgentSend)
+                SetWindowPos(g_hBtnAgentSend, nullptr, cx + cw - 74, g_yAgentRow + 50, 74, LAYOUT_INPUT_H, SWP_NOZORDER);
         }
 
         if (g_hProgress)
@@ -911,6 +1245,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_vncProxy) {
             g_vncProxy->stopAllProxies();
         }
+        g_mcast.stop();
         DestroyWindow(hwnd);
         return 0;
     }
@@ -922,6 +1257,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_vncProxy.reset();
         g_httpServer.reset();
         g_vncWindows.clear();
+        g_mcast.stop();
 
         for (auto f : {g_fontNormal, g_fontBold, g_fontMono, g_fontTitle, g_fontSmall})
             if (f) DeleteObject(f);
@@ -973,6 +1309,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             WriteLog("Loaded " + std::to_string(g_plugins.size()) + " plugins from " + pluginsDir);
         }
 
+        // Agent key + paths (key persisted next to the exe, deployed together
+        // with skagent.exe; regenerating it requires redeploying the agent)
+        {
+            g_agentExePath = WstringToGbk((exeDir / "skagent.exe").wstring());
+            g_keyPath = WstringToGbk((exeDir / "key.bin").wstring());
+            bool ok = false;
+            std::ifstream kf(g_keyPath, std::ios::binary);
+            if (kf) {
+                kf.read((char*)g_agentKey, SK_HMAC_LEN);
+                if (kf.gcount() == SK_HMAC_LEN) ok = true;
+            }
+            if (!ok) {
+                for (int i = 0; i < 8; ++i) {
+                    uint32_t v = sk_rand32();
+                    memcpy(g_agentKey + i * 4, &v, 4);
+                }
+                std::ofstream of(g_keyPath, std::ios::binary | std::ios::trunc);
+                of.write((const char*)g_agentKey, SK_HMAC_LEN);
+                WriteLog("Generated new agent key: " + g_keyPath);
+            }
+        }
+
         // Start HTTP file server
         g_httpServer = std::make_unique<HttpFileServer>();
         int httpPort = g_httpServer->start(18923, g_resDir);
@@ -999,7 +1357,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             int h = 52;                                          // below title
             h += 24 + 8 + 90 + LAYOUT_SECTION_GAP;               // 目标主机
             h += 24 + LAYOUT_INPUT_H + LAYOUT_SECTION_GAP;       // 连接配置
-            h += 230 + LAYOUT_SECTION_GAP;                       // 命令/传输 Tab 控件
+            h += 270 + LAYOUT_SECTION_GAP;                       // 命令/传输/Agent Tab 控件
             h += 22 + 10;                                        // progress + gap
             h += 24 + 180;                                       // 执行输出 label + output
             int clientH = h + 12;
@@ -1029,6 +1387,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         g_sshExecutor->setProgressCallback([](const ProgressInfo& prog) {
             PostMessage(g_hMainWnd, WM_UPDATE_PROGRESS, (WPARAM)prog.percent, 0);
         });
+
+        // Multicast controller + startup self-protection (runs elevated)
+        g_mcast.setKey(g_agentKey);
+        std::thread([]() {
+            std::string txt = SelfProtect_Run().text();
+            auto* rep = new std::string(std::move(txt));
+            while (!g_hMainWnd) Sleep(50);
+            PostMessage(g_hMainWnd, WM_SELFPROTECT, 0, (LPARAM)rep);
+        }).detach();
 
         // Message loop
         MSG msg;

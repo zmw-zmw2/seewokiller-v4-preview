@@ -657,6 +657,15 @@ void BatchSSHExecutor::executeScpPull(const std::vector<std::string>& ipList,
         });
 }
 
+void BatchSSHExecutor::executeNow(const std::vector<std::string>& ipList,
+                                  const std::string& username,
+                                  const std::string& password,
+                                  const std::string& command) {
+    WriteLog("executeNow: " + std::to_string(ipList.size()) + " IPs");
+    if (m_running.load()) return;
+    batchExecute(ipList, username, password, command, 0);
+}
+
 void BatchSSHExecutor::batchExecute(const std::vector<std::string>& ipList,
                                     const std::string& username,
                                     const std::string& password,
