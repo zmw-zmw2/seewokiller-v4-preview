@@ -14,35 +14,117 @@
 #endif
 #define SK_OK(s) (((NTSTATUS)(s)) >= 0)
 
-int sk_hmac_sha256(const uint8_t* key, size_t keyLen,
-                   const uint8_t* data, size_t dataLen, uint8_t out[SK_HMAC_LEN]) {
+#ifndef BCRYPT_ECDSA_P256_ALGORITHM
+#define BCRYPT_ECDSA_P256_ALGORITHM L"ECDSA_P256"
+#endif
+#ifndef BCRYPT_ECCPUBLIC_BLOB
+#define BCRYPT_ECCPUBLIC_BLOB L"ECCPUBLICBLOB"
+#endif
+#ifndef BCRYPT_ECCPRIVATE_BLOB
+#define BCRYPT_ECCPRIVATE_BLOB L"ECCPRIVATEBLOB"
+#endif
+
+/* ---------- SHA-256 ---------- */
+
+int sk_sha256(const uint8_t* data, size_t dataLen, uint8_t out[32]) {
     BCRYPT_ALG_HANDLE alg = NULL;
     BCRYPT_HASH_HANDLE h = NULL;
     NTSTATUS st;
 
-    st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL,
-                                     BCRYPT_ALG_HANDLE_HMAC_FLAG);
+    st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0);
     if (!SK_OK(st)) return -1;
 
-    st = BCryptCreateHash(alg, &h, NULL, 0, (PUCHAR)key, (ULONG)keyLen, 0);
-    if (!SK_OK(st)) { BCryptCloseAlgorithmProvider(alg, 0); return -1; }
-
-    st = BCryptHashData(h, (PUCHAR)data, (ULONG)dataLen, 0);
-    if (SK_OK(st)) st = BCryptFinishHash(h, out, SK_HMAC_LEN, 0);
-
+    st = BCryptCreateHash(alg, &h, NULL, 0, NULL, 0, 0);
+    if (SK_OK(st)) {
+        st = BCryptHashData(h, (PUCHAR)data, (ULONG)dataLen, 0);
+        if (SK_OK(st)) st = BCryptFinishHash(h, out, 32, 0);
+    }
     BCryptDestroyHash(h);
     BCryptCloseAlgorithmProvider(alg, 0);
     return SK_OK(st) ? 0 : -1;
 }
 
-static int sk_secure_memcmp(const uint8_t* a, const uint8_t* b, size_t n) {
-    uint8_t d = 0;
-    for (size_t i = 0; i < n; ++i) d |= (uint8_t)(a[i] ^ b[i]);
-    return d ? -1 : 0;
+/* ---------- ECDSA P-256 via CNG ---------- */
+
+int sk_ecdsa_genkeypair(uint8_t priv[SK_PRIV_LEN], uint8_t pub[SK_PUB_LEN]) {
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_KEY_HANDLE key = NULL;
+    NTSTATUS st;
+    int rc = -1;
+
+    st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0);
+    if (!SK_OK(st)) return -1;
+
+    st = BCryptGenerateKeyPair(alg, &key, 256, 0);
+    if (SK_OK(st)) st = BCryptFinalizeKeyPair(key, 0);
+
+    ULONG cb = 0;
+    if (SK_OK(st)) {
+        st = BCryptExportKey(key, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                             NULL, 0, &cb, 0);
+        if (SK_OK(st) && cb != SK_PRIV_LEN) st = (NTSTATUS)0xC0000009BL;
+        else if (SK_OK(st))
+            st = BCryptExportKey(key, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                 (PUCHAR)priv, SK_PRIV_LEN, &cb, 0);
+    }
+    if (SK_OK(st)) {
+        st = BCryptExportKey(key, NULL, BCRYPT_ECCPUBLIC_BLOB,
+                             NULL, 0, &cb, 0);
+        if (SK_OK(st) && cb != SK_PUB_LEN) st = (NTSTATUS)0xC0000009BL;
+        else if (SK_OK(st))
+            st = BCryptExportKey(key, NULL, BCRYPT_ECCPUBLIC_BLOB,
+                                 (PUCHAR)pub, SK_PUB_LEN, &cb, 0);
+    }
+    rc = SK_OK(st) ? 0 : -1;
+
+    if (key) BCryptDestroyKey(key);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return rc;
 }
 
+int sk_ecdsa_sign(const uint8_t priv[SK_PRIV_LEN], const uint8_t hash[32],
+                  uint8_t sig[SK_SIG_LEN]) {
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_KEY_HANDLE key = NULL;
+    NTSTATUS st;
+    ULONG cb = 0;
+
+    st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0);
+    if (!SK_OK(st)) return -1;
+
+    st = BCryptImportKeyPair(alg, NULL, BCRYPT_ECCPRIVATE_BLOB, &key,
+                             (PUCHAR)priv, SK_PRIV_LEN, 0);
+    if (SK_OK(st))
+        st = BCryptSignHash(key, NULL, (PUCHAR)hash, 32,
+                            sig, SK_SIG_LEN, &cb, 0);
+    if (key) BCryptDestroyKey(key);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return SK_OK(st) ? 0 : -1;
+}
+
+int sk_ecdsa_verify(const uint8_t pub[SK_PUB_LEN], const uint8_t hash[32],
+                    const uint8_t sig[SK_SIG_LEN]) {
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_KEY_HANDLE key = NULL;
+    NTSTATUS st;
+
+    st = BCryptOpenAlgorithmProvider(&alg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0);
+    if (!SK_OK(st)) return -1;
+
+    st = BCryptImportKeyPair(alg, NULL, BCRYPT_ECCPUBLIC_BLOB, &key,
+                             (PUCHAR)pub, SK_PUB_LEN, 0);
+    if (SK_OK(st))
+        st = BCryptVerifySignature(key, NULL, (PUCHAR)hash, 32,
+                                   (PUCHAR)sig, SK_SIG_LEN, 0);
+    if (key) BCryptDestroyKey(key);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return SK_OK(st) ? 0 : -1;
+}
+
+/* ---------- packet build / parse ---------- */
+
 size_t sk_build_packet(uint8_t msg_type, const char* json,
-                       const uint8_t key[SK_HMAC_LEN],
+                       const uint8_t* privKey,
                        uint8_t* out, size_t outCap) {
     size_t jl = strlen(json);
     if (jl > SK_MAX_JSON) return 0;
@@ -57,14 +139,17 @@ size_t sk_build_packet(uint8_t msg_type, const char* json,
     memcpy(out + 6, &jl16, 2);
     memcpy(out + SK_PKT_OVERHEAD, json, jl);
 
-    /* sign everything with the hmac field zeroed */
-    if (sk_hmac_sha256(key, SK_HMAC_LEN, out, SK_PKT_OVERHEAD + jl,
-                       out + SK_HDR_LEN) != 0)
-        return 0;
+    /* signature over the whole packet with the sig field zeroed */
+    if (privKey) {
+        uint8_t h[32];
+        if (sk_sha256(out, SK_PKT_OVERHEAD + jl, h) != 0) return 0;
+        if (sk_ecdsa_sign(privKey, h, out + SK_HDR_LEN) != 0) return 0;
+    }
     return SK_PKT_OVERHEAD + jl;
 }
 
-int sk_parse_packet(const uint8_t* buf, size_t len, const uint8_t key[SK_HMAC_LEN],
+int sk_parse_packet(const uint8_t* buf, size_t len,
+                    const uint8_t* pubKey,
                     uint8_t* msg_type, char* jsonOut, size_t jsonCap) {
     if (len < SK_PKT_OVERHEAD || len > SK_MAX_PACKET) return -1;
 
@@ -78,13 +163,15 @@ int sk_parse_packet(const uint8_t* buf, size_t len, const uint8_t key[SK_HMAC_LE
     if ((size_t)jl + SK_PKT_OVERHEAD != len) return -1;
     if ((size_t)jl + 1 > jsonCap) return -1;
 
-    /* MAC is computed over the packet with the hmac field zeroed */
-    uint8_t tmp[SK_MAX_PACKET];
-    memcpy(tmp, buf, len);
-    memset(tmp + SK_HDR_LEN, 0, SK_HMAC_LEN);
-    uint8_t mac[SK_HMAC_LEN];
-    if (sk_hmac_sha256(key, SK_HMAC_LEN, tmp, len, mac) != 0) return -1;
-    if (sk_secure_memcmp(mac, buf + SK_HDR_LEN, SK_HMAC_LEN) != 0) return -1;
+    if (pubKey) {
+        /* verify over the packet with the sig field zeroed */
+        uint8_t tmp[SK_MAX_PACKET];
+        memcpy(tmp, buf, len);
+        memset(tmp + SK_HDR_LEN, 0, SK_SIG_LEN);
+        uint8_t h[32];
+        if (sk_sha256(tmp, len, h) != 0) return -1;
+        if (sk_ecdsa_verify(pubKey, h, buf + SK_HDR_LEN) != 0) return -1;
+    }
 
     *msg_type = buf[5];
     memcpy(jsonOut, buf + SK_PKT_OVERHEAD, jl);

@@ -1,13 +1,17 @@
 #pragma once
 // Shared wire protocol for SeewoKiller <-> skagent (pure C, no deps).
 //
-// Packet layout (little-endian):
-//   [0..4)   magic "SKAG"
-//   [4]      protocol version
-//   [5]      msg type (1=command, 2=reply)
-//   [6..8)   json length
-//   [8..40)  HMAC-SHA256 over the WHOLE packet with this field zeroed
-//   [40..)   JSON payload (UTF-8, flat key/value only)
+// Packet layout v2 (little-endian):
+//   [0..4)    magic "SKAG"
+//   [4]       protocol version (2)
+//   [5]       msg type (1=command, 2=reply)
+//   [6..8)    json length
+//   [8..72)   ECDSA P-256 signature (r||s, 32+32 bytes LE) over the WHOLE
+//             packet with this field zeroed. Commands are signed by the
+//             controller's private key; agents hold only the public key.
+//             Agent replies carry a zero signature (agents hold no private
+//             key; forged replies are harmless by design).
+//   [72..)    JSON payload (UTF-8, flat key/value only)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -17,10 +21,12 @@ extern "C" {
 #endif
 
 #define SK_MAGIC            0x47414B53u   /* "SKAG" */
-#define SK_PROTO_VERSION    1
-#define SK_HMAC_LEN         32
+#define SK_PROTO_VERSION    2
+#define SK_SIG_LEN          64
+#define SK_PRIV_LEN         104           /* BCRYPT_ECCPRIVATE_BLOB, P-256 */
+#define SK_PUB_LEN          72            /* BCRYPT_ECCPUBLIC_BLOB, P-256 */
 #define SK_HDR_LEN          8
-#define SK_PKT_OVERHEAD     (SK_HDR_LEN + SK_HMAC_LEN)
+#define SK_PKT_OVERHEAD     (SK_HDR_LEN + SK_SIG_LEN)
 #define SK_MAX_JSON         2048
 #define SK_MAX_PACKET       (SK_PKT_OVERHEAD + SK_MAX_JSON)
 
@@ -41,18 +47,31 @@ typedef struct {
     uint16_t json_len;
 } SkHeader;
 
-/* HMAC-SHA256 via CNG. Returns 0 on success. */
-int sk_hmac_sha256(const uint8_t* key, size_t keyLen,
-                   const uint8_t* data, size_t dataLen, uint8_t out[SK_HMAC_LEN]);
+/* Plain SHA-256 (no key). Returns 0 on success. */
+int sk_sha256(const uint8_t* data, size_t dataLen, uint8_t out[32]);
 
-/* Build a signed packet. Returns total length, or 0 on error/too long. */
+/* Generate an ECDSA P-256 keypair (raw CNG blobs). Returns 0 on success. */
+int sk_ecdsa_genkeypair(uint8_t priv[SK_PRIV_LEN], uint8_t pub[SK_PUB_LEN]);
+
+/* Sign a 32-byte digest. Returns 0 on success. */
+int sk_ecdsa_sign(const uint8_t priv[SK_PRIV_LEN], const uint8_t hash[32],
+                  uint8_t sig[SK_SIG_LEN]);
+
+/* Verify a signature over a 32-byte digest. Returns 0 if valid, -1 if not. */
+int sk_ecdsa_verify(const uint8_t pub[SK_PUB_LEN], const uint8_t hash[32],
+                    const uint8_t sig[SK_SIG_LEN]);
+
+/* Build a packet. privKey=NULL emits a zero signature (agent replies).
+ * Returns total length, or 0 on error/too long. */
 size_t sk_build_packet(uint8_t msg_type, const char* json,
-                       const uint8_t key[SK_HMAC_LEN],
+                       const uint8_t* privKey /*nullable, SK_PRIV_LEN*/,
                        uint8_t* out, size_t outCap);
 
-/* Verify signature and parse. Returns 0 on success (jsonOut is
- * NUL-terminated), -1 on bad packet/signature. */
-int sk_parse_packet(const uint8_t* buf, size_t len, const uint8_t key[SK_HMAC_LEN],
+/* Verify signature and parse. pubKey=NULL skips the signature check
+ * (controller reading unsigned agent replies). Returns 0 on success
+ * (jsonOut is NUL-terminated), -1 on bad packet/signature. */
+int sk_parse_packet(const uint8_t* buf, size_t len,
+                    const uint8_t* pubKey /*nullable, SK_PUB_LEN*/,
                     uint8_t* msg_type, char* jsonOut, size_t jsonCap);
 
 /* Flat-JSON helpers (objects of scalars only). */

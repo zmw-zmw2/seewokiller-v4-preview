@@ -26,6 +26,9 @@ if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
 endif()
 
+# Release: no PDB / no debug refs (lightweight anti-reverse, see hardening.h)
+target_link_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/DEBUG:NONE>)
+
 # Include directories - vcpkg headers + our src
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
