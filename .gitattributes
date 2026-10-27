@@ -1,0 +1,3 @@
+# noVNC is bundled third-party frontend code, exclude from language stats
+res/novnc/** linguist-vendored
+res/novnc/** -linguist-detectable

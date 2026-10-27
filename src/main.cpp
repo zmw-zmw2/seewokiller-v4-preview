@@ -7,12 +7,18 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <objbase.h>
+#include <richedit.h>
+#include <map>
 #include <string>
 #include <memory>
 #include <filesystem>
 #include <fstream>
 
 #include <libssh/libssh.h>
+
+#ifndef EM_SETBKCOLOR
+#define EM_SETBKCOLOR (WM_USER + 63)
+#endif
 
 #include "ssh_engine.h"
 #include "vnc_proxy.h"
@@ -32,17 +38,23 @@
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "shell32.lib")
 
-// ==================== Color Theme ====================
-const COLORREF CLR_BG         = RGB(20, 25, 35);
-const COLORREF CLR_CARD       = RGB(30, 35, 45);
-const COLORREF CLR_PRIMARY    = RGB(0, 120, 215);
-const COLORREF CLR_TEXT       = RGB(220, 220, 220);
-const COLORREF CLR_TEXT2      = RGB(160, 160, 160);
-const COLORREF CLR_INPUT_BG   = RGB(25, 30, 40);
-const COLORREF CLR_BTN_BG     = RGB(40, 45, 55);
-const COLORREF CLR_BTN_SILVER = RGB(226, 228, 232);       // silver-white button background
-const COLORREF CLR_BTN_SILVER_DK = RGB(130, 136, 146);    // silver-white button border
-const COLORREF CLR_BTN_TEXT_DK = RGB(35, 38, 48);         // silver-white button text
+// ==================== Color Theme (dark, accent blue) ====================
+const COLORREF CLR_BG         = RGB(15, 18, 26);        // window background
+const COLORREF CLR_CARD       = RGB(26, 30, 41);        // section card surface
+const COLORREF CLR_CARD_LINE  = RGB(43, 49, 64);        // card border
+const COLORREF CLR_PRIMARY    = RGB(64, 132, 250);      // accent blue
+const COLORREF CLR_PRIMARY_HV = RGB(88, 150, 255);      // accent hover
+const COLORREF CLR_PRIMARY_PR = RGB(44, 104, 205);      // accent pressed
+const COLORREF CLR_PRIMARY_TX = RGB(112, 162, 255);     // accent text on dark
+const COLORREF CLR_SUCCESS    = RGB(52, 199, 123);
+const COLORREF CLR_DANGER     = RGB(255, 99, 88);
+const COLORREF CLR_WARN       = RGB(235, 195, 110);
+const COLORREF CLR_TEXT       = RGB(226, 230, 238);
+const COLORREF CLR_TEXT2      = RGB(148, 156, 172);
+const COLORREF CLR_INPUT_BG   = RGB(17, 21, 30);
+const COLORREF CLR_BTN_BG     = RGB(39, 45, 59);
+const COLORREF CLR_BTN_HOVER  = RGB(52, 60, 78);
+const COLORREF CLR_BTN_PRESS  = RGB(29, 34, 46);
 
 // ==================== Control IDs ====================
 #define IDC_EDIT_IP        2001
@@ -67,6 +79,8 @@ const COLORREF CLR_BTN_TEXT_DK = RGB(35, 38, 48);         // silver-white button
 #define IDC_EDIT_AGENT_PARAM  2027
 #define IDC_BTN_AGENT_SEND    2028
 #define IDC_BTN_SCP_RUN       2029
+#define IDC_STATUS_L          2030
+#define IDC_STATUS_R          2031
 
 // Plugin buttons start at 3000. Reserve a wide range; plugin index is
 // (id - PLUGIN_BTN_BASE).
@@ -120,6 +134,13 @@ static uint8_t g_agentKey[SK_HMAC_LEN] = {0};
 static std::string g_keyPath, g_agentExePath;
 static McastController g_mcast;
 
+// 状态栏 + 高亮文本控件
+static HWND g_hStatusL, g_hStatusR;
+static std::string g_localIp = "0.0.0.0";
+static std::vector<HWND> g_accentStatics;   // section headers drawn in accent color
+static std::vector<HWND> g_statusStatics;   // status bar statics (bg = window bg)
+static std::map<HWND, bool> g_btnHover, g_btnPress;
+
 // ==================== Layout geometry ====================
 // Consistent grid + spacing used by WM_CREATE / WM_SIZE.
 constexpr int LAYOUT_MARGIN = 24;       // left/right margin from window edge
@@ -167,6 +188,40 @@ static std::string getEditText(HWND hEdit) {
     return WstringToGbk(buf);
 }
 
+// Same as getEditText but yields UTF-8 (used for agent JSON payloads, whose
+// wire protocol is UTF-8).
+static std::string getEditTextUtf8(HWND hEdit) {
+    int len = GetWindowTextLengthW(hEdit);
+    if (len <= 0) return "";
+    std::wstring buf(len + 1, 0);
+    GetWindowTextW(hEdit, &buf[0], len + 1);
+    buf.resize(len);
+    if (buf.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, buf.c_str(), (int)buf.size(),
+                                nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return "";
+    std::string out(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, buf.c_str(), (int)buf.size(), &out[0], n,
+                        nullptr, nullptr);
+    return out;
+}
+
+// Display decode for any byte soup coming from the network/console: strict
+// UTF-8 first (agent replies, our own UTF-8 literals), GBK fallback (remote
+// cmd.exe output on zh-CN Windows).
+static std::wstring ToDisplayWide(const std::string& str) {
+    if (str.empty()) return L"";
+    int n8 = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                 str.data(), (int)str.size(), nullptr, 0);
+    if (n8 > 0) {
+        std::wstring w(n8, 0);
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                            str.data(), (int)str.size(), &w[0], n8);
+        return w;
+    }
+    return GbkToWstring(str);
+}
+
 static void setEditText(HWND hEdit, const std::string& text) {
     SetWindowTextW(hEdit, GbkToWstring(text).c_str());
 }
@@ -181,15 +236,70 @@ static void WriteLog(const std::string& message) {
     OutputDebugStringA(("SeewoKiller: " + message + "\n").c_str());
 }
 
-// ==================== Button color map for WM_DRAWITEM ====================
-static COLORREF GetButtonColor(int id) {
-    (void)id;
-    return CLR_BTN_SILVER;
+// ==================== Button styling: accent map + hover tracking ====================
+static bool IsAccentButton(int id) {
+    switch (id) {
+    case IDC_BTN_EXECUTE:
+    case IDC_BTN_SCP_PUSH:
+    case IDC_BTN_SCP_PULL:
+    case IDC_BTN_SCP_RUN:
+    case IDC_BTN_AGENT_DEPLOY:
+    case IDC_BTN_AGENT_PING:
+    case IDC_BTN_AGENT_SEND:
+        return true;
+    }
+    return false;
 }
 
-static COLORREF GetButtonBorderColor(int id) {
-    (void)id;
-    return CLR_BTN_SILVER_DK;
+// Track hover/pressed state for owner-drawn buttons.
+static LRESULT CALLBACK BtnSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                        LPARAM lParam, UINT_PTR uIdSubclass,
+                                        DWORD_PTR) {
+    switch (msg) {
+    case WM_MOUSEMOVE: {
+        if (!g_btnHover[hWnd]) {
+            g_btnHover[hWnd] = true;
+            InvalidateRect(hWnd, nullptr, TRUE);
+        }
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hWnd, 0 };
+        TrackMouseEvent(&tme);
+        break;
+    }
+    case WM_MOUSELEAVE:
+        g_btnHover[hWnd] = false;
+        g_btnPress[hWnd] = false;
+        InvalidateRect(hWnd, nullptr, TRUE);
+        break;
+    case WM_LBUTTONDOWN:
+        g_btnPress[hWnd] = true;
+        InvalidateRect(hWnd, nullptr, TRUE);
+        break;
+    case WM_LBUTTONUP:
+        g_btnPress[hWnd] = false;
+        InvalidateRect(hWnd, nullptr, TRUE);
+        break;
+    case WM_NCDESTROY:
+        g_btnHover.erase(hWnd);
+        g_btnPress.erase(hWnd);
+        RemoveWindowSubclass(hWnd, BtnSubclassProc, uIdSubclass);
+        break;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
+}
+
+static void MakeHoverButton(HWND h) {
+    if (h) SetWindowSubclass(h, BtnSubclassProc, 0, 0);
+}
+
+// Output area: forward right-click to the parent so the context menu works.
+static LRESULT CALLBACK OutputSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
+                                           LPARAM lParam, UINT_PTR uIdSubclass,
+                                           DWORD_PTR) {
+    if (msg == WM_CONTEXTMENU) {
+        SendMessageW(g_hMainWnd, WM_CONTEXTMENU, wParam, lParam);
+        return 0;
+    }
+    return DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
 // ==================== Tab helpers ====================
@@ -213,7 +323,7 @@ static LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
         HDC hdc = (HDC)wParam;
         RECT rc;
         GetClientRect(hWnd, &rc);
-        FillRect(hdc, &rc, g_brBg);
+        FillRect(hdc, &rc, g_brCard);
         return TRUE;
     }
     case WM_PAINT: {
@@ -225,7 +335,7 @@ static LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT msg, WPARAM wParam,
         if (hdc) {
             RECT rcContent;
             TabCtrl_AdjustRect(hWnd, FALSE, &rcContent);
-            HPEN pen = CreatePen(PS_SOLID, 1, RGB(50, 55, 65));
+            HPEN pen = CreatePen(PS_SOLID, 1, CLR_CARD_LINE);
             HPEN oldPen = (HPEN)SelectObject(hdc, pen);
             HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
             Rectangle(hdc, rcContent.left, rcContent.top,
@@ -313,6 +423,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             LAYOUT_MARGIN, 14, 400, 28, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
         SendMessage(hTitle, WM_SETFONT, (WPARAM)g_fontTitle, TRUE);
 
+        HWND hBadge = CreateWindowW(L"STATIC", L"v4 \u00b7 Agent",
+            WS_VISIBLE | WS_CHILD,
+            LAYOUT_MARGIN + 215, 22, 160, 20, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
+        SendMessage(hBadge, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+        g_accentStatics.push_back(hBadge);
+
         const int M = LAYOUT_MARGIN;
         RECT clientRc;
         GetClientRect(hwnd, &clientRc);
@@ -323,12 +439,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_cmdTabControls.clear();
         g_scpTabControls.clear();
 
-        // Section header: bold label.
+        // Section header: bold label in accent color.
         auto sectionHeader = [&](const wchar_t* text) -> HWND {
             HWND h = CreateWindowW(L"STATIC", text,
                 WS_VISIBLE | WS_CHILD, M, y, W, 24, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(h, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            g_accentStatics.push_back(h);
             y += 24 + 8;
             return h;
         };
@@ -435,6 +552,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                     x, cy, btnW, btnH, hwnd, (HMENU)(PLUGIN_BTN_BASE + i),
                     GetModuleHandle(nullptr), nullptr);
+                MakeHoverButton(hBtn);
                 g_cmdTabControls.push_back(hBtn);
                 x += btnW + hGap;
             }
@@ -458,6 +576,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 110, cy, 110, g_hCmd, hwnd, (HMENU)IDC_BTN_EXECUTE,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnExecute);
             g_cmdTabControls.push_back(g_hBtnExecute);
         }
 
@@ -483,6 +602,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 90, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_BROWSE,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnScpBrowse);
             g_scpTabControls.push_back(g_hBtnScpBrowse);
 
             scy += LAYOUT_INPUT_H + 12;
@@ -504,16 +624,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 306, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PUSH,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnScpPush);
             g_scpTabControls.push_back(g_hBtnScpPush);
             g_hBtnScpPull = CreateWindowW(L"BUTTON", L"\u4ece\u9996\u53f0\u62c9\u53d6",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 206, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PULL,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnScpPull);
             g_scpTabControls.push_back(g_hBtnScpPull);
             g_hBtnScpRun = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20\u5e76\u8fd0\u884c",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 106, scy, 100, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_RUN,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnScpRun);
             g_scpTabControls.push_back(g_hBtnScpRun);
 
             scy += LAYOUT_INPUT_H + 8;
@@ -532,18 +655,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx, ay, 150, 34, hwnd, (HMENU)IDC_BTN_AGENT_DEPLOY,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnAgentDeploy);
             g_agentTabControls.push_back(g_hBtnAgentDeploy);
 
             g_hLblAgentOnline = CreateWindowW(L"STATIC", L"\u5728\u7ebf: --",
                 WS_VISIBLE | WS_CHILD, cx + 170, ay + 8, 120, 20, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(g_hLblAgentOnline, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            g_accentStatics.push_back(g_hLblAgentOnline);
             g_agentTabControls.push_back(g_hLblAgentOnline);
 
             g_hBtnAgentPing = CreateWindowW(L"BUTTON", L"\u5237\u65b0\u5728\u7ebf",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + 300, ay, 100, 30, hwnd, (HMENU)IDC_BTN_AGENT_PING,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnAgentPing);
             g_agentTabControls.push_back(g_hBtnAgentPing);
 
             ay = contentY + 50;
@@ -595,10 +721,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 74, ay, 74, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_AGENT_SEND,
                 GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnAgentSend);
             g_agentTabControls.push_back(g_hBtnAgentSend);
 
             hLbl = CreateWindowW(L"STATIC",
-                L"\u53c2\u6570: exec/exec_wait=\u547d\u4ee4, msg=\u6587\u5b57, open_url=\u7f51\u5740, \u5176\u4f59\u7559\u7a7a; \u56de\u6267\u663e\u793a\u5728\u4e0b\u65b9\u8f93\u51fa\u533a",
+                L"\u53c2\u6570: exec/exec_wait=\u547d\u4ee4, msg=\u6587\u5b57, open_url=\u7f51\u5740, \u5176\u4f59\u7559\u7a7a; \u6240\u6709\u52a8\u4f5c\u4ec5\u5bf9\u4e0a\u65b9IP\u8303\u56f4\u5185\u7684\u4e3b\u673a\u751f\u6548, \u56de\u6267\u663e\u793a\u5728\u4e0b\u65b9\u8f93\u51fa\u533a",
                 WS_VISIBLE | WS_CHILD, cx, contentY + 92, contentW, 18, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
@@ -613,33 +740,65 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         y += TAB_H + LAYOUT_SECTION_GAP;
         g_hProgress = CreateWindow(PROGRESS_CLASS, nullptr,
             WS_VISIBLE | WS_CHILD | PBS_SMOOTH,
-            M, y, W, 22, hwnd, (HMENU)IDC_PROGRESS, GetModuleHandle(nullptr), nullptr);
+            M, y, W, 8, hwnd, (HMENU)IDC_PROGRESS, GetModuleHandle(nullptr), nullptr);
         SendMessage(g_hProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
         SendMessage(g_hProgress, PBM_SETBARCOLOR, 0, CLR_PRIMARY);
-        SendMessage(g_hProgress, PBM_SETBKCOLOR, 0, CLR_CARD);
+        SendMessage(g_hProgress, PBM_SETBKCOLOR, 0, CLR_INPUT_BG);
         g_yProg = y;
-        y += 22 + 10;
+        y += 8 + 10;
 
-        // === 执行输出 ===
+        // === 执行输出 (RichEdit: colored per-line log) ===
         {
             HWND hLbl = CreateWindowW(L"STATIC", L"\u6267\u884c\u8f93\u51fa",
                 WS_VISIBLE | WS_CHILD, M, y, 120, 20, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            g_accentStatics.push_back(hLbl);
         }
         y += 24;
         g_yOutput = y;
-        g_hEditOutput = CreateWindowW(L"EDIT",
-            L"Seewo Killer v3 (C++)\r\n\r\n"
+        LoadLibraryW(L"msftedit.dll");   // RICHEDIT50W provider
+        g_hEditOutput = CreateWindowW(MSFTEDIT_CLASS, L"",
+            WS_VISIBLE | WS_CHILD | ES_MULTILINE | WS_VSCROLL | ES_AUTOVSCROLL | ES_READONLY,
+            M, y, W, 180, hwnd, (HMENU)IDC_EDIT_OUTPUT, GetModuleHandle(nullptr), nullptr);
+        // RichEdit ignores the window name at creation, set text explicitly.
+        SetWindowTextW(g_hEditOutput,
+            L"Seewo Killer v4\r\n\r\n"
             L"\u4f7f\u7528\u8bf4\u660e\uff1a\r\n"
             L"* \u9876\u90e8\uff1aIP\u8303\u56f4\u3001\u7528\u6237\u540d\u3001\u5bc6\u7801\u3001\u5ef6\u8fdf/\u5faa\u73af\u914d\u7f6e\r\n"
             L"* \u547d\u4ee4\u6267\u884c Tab\uff1a\u70b9\u51fb\u63d2\u4ef6\u6309\u94ae\u586b\u5145\u547d\u4ee4\uff0c\u6216\u5728\u4e0b\u65b9\u8f93\u5165\u81ea\u5b9a\u4e49\u547d\u4ee4\r\n"
             L"* \u6587\u4ef6\u4f20\u8f93 Tab\uff1aSCP \u4e0a\u4f20\u5230\u6240\u6709\u76ee\u6807\uff0c\u6216\u4ece\u9996\u53f0\u6210\u529f\u673a\u5668\u62c9\u53d6\r\n"
-            L"* \u70b9\u51fb\u5f00\u59cb\u6267\u884c / \u4e0a\u4f20\u5230\u5168\u90e8 / \u4ece\u9996\u53f0\u62c9\u53d6\u89e6\u53d1\u64cd\u4f5c\r\n",
-            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_MULTILINE | WS_VSCROLL | ES_AUTOVSCROLL | ES_READONLY,
-            M, y, W, 180, hwnd, (HMENU)IDC_EDIT_OUTPUT, GetModuleHandle(nullptr), nullptr);
-        SendMessage(g_hEditOutput, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
-        // Allow very large output text (0x7FFFFFFE = ~2 billion chars, effectively unlimited)
-        SendMessage(g_hEditOutput, EM_LIMITTEXT, (WPARAM)0x7FFFFFFE, 0);
+            L"* Agent\u5206\u53d1 Tab\uff1a\u7ec4\u64ad\u4ec5\u5bf9IP\u8303\u56f4\u5185\u7684\u4e3b\u673a\u751f\u6548\r\n");
+        SetWindowSubclass(g_hEditOutput, OutputSubclassProc, 0, 0);
+        SendMessage(g_hEditOutput, EM_SETBKCOLOR, 0, CLR_INPUT_BG);
+        SendMessage(g_hEditOutput, EM_EXLIMITTEXT, 0, 0x7FFFFFF0);
+        {
+            CHARFORMATW cf = {};
+            cf.cbSize = sizeof(cf);
+            cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR | CFM_BOLD;
+            cf.dwEffects = 0;
+            cf.yHeight = 210;                       // 10.5pt in twips
+            cf.crTextColor = CLR_TEXT;
+            wcscpy_s(cf.szFaceName, LF_FACESIZE, L"Consolas");
+            cf.bPitchAndFamily = FIXED_PITCH | FF_MODERN;
+            SendMessageW(g_hEditOutput, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+        }
+
+        // === Status bar ===
+        {
+            g_hStatusL = CreateWindowW(L"STATIC", L"",
+                WS_VISIBLE | WS_CHILD, M, 10, 420, 22, hwnd, (HMENU)IDC_STATUS_L,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(g_hStatusL, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+            g_statusStatics.push_back(g_hStatusL);
+            g_hStatusR = CreateWindowW(L"STATIC", L"Seewo Killer v4",
+                WS_VISIBLE | WS_CHILD | SS_RIGHT, 460, 10, 260, 22, hwnd, (HMENU)IDC_STATUS_R,
+                GetModuleHandle(nullptr), nullptr);
+            SendMessage(g_hStatusR, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+            g_statusStatics.push_back(g_hStatusR);
+
+            std::string st = "\u672c\u673a: " + g_localIp + "    \u5728\u7ebf: --";
+            SetWindowTextW(g_hStatusL, ToDisplayWide(st).c_str());
+        }
 
         return 0;
     }
@@ -647,19 +806,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT pDraw = (LPDRAWITEMSTRUCT)lParam;
 
-        // Owner-drawn Tab Control (dark theme)
+        // Owner-drawn Tab Control: segmented style, active tab = accent.
         if (pDraw->CtlType == ODT_TAB) {
             int idx = (int)pDraw->itemID;
             bool active = (idx == (int)SendMessageW(pDraw->hwndItem, TCM_GETCURSEL, 0, 0));
-            COLORREF bg = active ? CLR_BTN_SILVER : CLR_CARD;
-            COLORREF border = active ? CLR_BTN_SILVER_DK : RGB(55, 60, 72);
+            COLORREF bg = active ? CLR_PRIMARY : CLR_CARD;
+            COLORREF border = active ? CLR_PRIMARY : CLR_CARD_LINE;
 
-            // Background
             HBRUSH hBrush = CreateSolidBrush(bg);
             FillRect(pDraw->hDC, &pDraw->rcItem, hBrush);
             DeleteObject(hBrush);
 
-            // Border
             HPEN hPen = CreatePen(PS_SOLID, 1, border);
             HPEN hOldPen = (HPEN)SelectObject(pDraw->hDC, hPen);
             HBRUSH hOldBrush = (HBRUSH)SelectObject(pDraw->hDC, GetStockObject(NULL_BRUSH));
@@ -669,14 +826,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SelectObject(pDraw->hDC, hOldBrush);
             DeleteObject(hPen);
 
-            // Tab text
             WCHAR text[128] = {0};
             TCITEMW tci = { TCIF_TEXT };
             tci.pszText = text;
             tci.cchTextMax = 128;
             SendMessageW(pDraw->hwndItem, TCM_GETITEMW, idx, (LPARAM)&tci);
             SetBkMode(pDraw->hDC, TRANSPARENT);
-            SetTextColor(pDraw->hDC, active ? CLR_BTN_TEXT_DK : CLR_TEXT);
+            SetTextColor(pDraw->hDC, active ? RGB(255, 255, 255) : CLR_TEXT2);
             HFONT hOldFont = (HFONT)SelectObject(pDraw->hDC, g_fontBold);
             DrawTextW(pDraw->hDC, text, -1, &pDraw->rcItem,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -687,26 +843,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (pDraw->CtlType != ODT_BUTTON) return 0;
 
         int id = (int)pDraw->CtlID;
-        COLORREF bgColor = GetButtonColor(id);
-        COLORREF borderColor = GetButtonBorderColor(id);
-        COLORREF textColor = CLR_BTN_TEXT_DK;
+        HWND hBtn = pDraw->hwndItem;
+        bool hover = g_btnHover[hBtn];
+        bool press = g_btnPress[hBtn];
 
-        // Draw background
+        COLORREF bgColor, borderColor, textColor;
+        if (IsAccentButton(id)) {
+            bgColor = press ? CLR_PRIMARY_PR : hover ? CLR_PRIMARY_HV : CLR_PRIMARY;
+            borderColor = bgColor;
+            textColor = RGB(255, 255, 255);
+        } else {
+            bgColor = press ? CLR_BTN_PRESS : hover ? CLR_BTN_HOVER : CLR_BTN_BG;
+            borderColor = hover ? RGB(72, 80, 99) : CLR_CARD_LINE;
+            textColor = CLR_TEXT;
+        }
+
         HBRUSH hBrush = CreateSolidBrush(bgColor);
         FillRect(pDraw->hDC, &pDraw->rcItem, hBrush);
         DeleteObject(hBrush);
 
-        // Draw border
         HPEN hPen = CreatePen(PS_SOLID, 1, borderColor);
         HPEN hOldPen = (HPEN)SelectObject(pDraw->hDC, hPen);
         HBRUSH hOldBrush = (HBRUSH)SelectObject(pDraw->hDC, GetStockObject(NULL_BRUSH));
         RoundRect(pDraw->hDC, pDraw->rcItem.left, pDraw->rcItem.top,
-            pDraw->rcItem.right, pDraw->rcItem.bottom, 4, 4);
+            pDraw->rcItem.right, pDraw->rcItem.bottom, 8, 8);
         SelectObject(pDraw->hDC, hOldPen);
         SelectObject(pDraw->hDC, hOldBrush);
         DeleteObject(hPen);
 
-        // Draw text
         WCHAR text[100];
         GetWindowTextW(pDraw->hwndItem, text, 100);
         SetBkMode(pDraw->hDC, TRANSPARENT);
@@ -728,12 +892,70 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, g_brBg);
+
+        // Section cards behind the controls (recomputed from live positions,
+        // so they follow resizes automatically).
+        if (g_hEditOutput && g_hTab) {
+            auto card = [&](RECT r) {
+                HBRUSH br = CreateSolidBrush(CLR_CARD);
+                HPEN pen = CreatePen(PS_SOLID, 1, CLR_CARD_LINE);
+                HGDIOBJ ob = SelectObject(hdc, br);
+                HGDIOBJ op = SelectObject(hdc, pen);
+                RoundRect(hdc, r.left, r.top, r.right, r.bottom, 12, 12);
+                SelectObject(hdc, ob);
+                SelectObject(hdc, op);
+                DeleteObject(br);
+                DeleteObject(pen);
+            };
+            auto childCardRect = [&](HWND h, int padT, int padB) {
+                RECT r;
+                GetWindowRect(h, &r);
+                MapWindowPoints(nullptr, hwnd, (POINT*)&r, 2);
+                r.left -= 12; r.right += 12; r.top -= padT; r.bottom += padB;
+                return r;
+            };
+            card(childCardRect(g_hEditIP, 34, 14));      // 目标主机
+            card(childCardRect(g_hEditUser, 34, 14));    // 连接配置
+            card(childCardRect(g_hTab, 8, 12));          // 功能 Tab 区
+
+            // progress + output merged into one card
+            RECT rp = childCardRect(g_hProgress, 6, 0);
+            RECT ro = childCardRect(g_hEditOutput, 34, 14);
+            if (ro.top > rp.top) ro.top = rp.top;
+            card(ro);
+        }
+        return 1;
+    }
+
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, CLR_TEXT);
-        SetBkColor(hdc, CLR_BG);
+        HWND hCtl = (HWND)lParam;
+        bool isStatus = false;
+        bool isAccent = false;
+        for (HWND h : g_statusStatics) if (h == hCtl) { isStatus = true; break; }
+        for (HWND h : g_accentStatics) if (h == hCtl) { isAccent = true; break; }
+        if (isStatus) {
+            SetTextColor(hdc, CLR_TEXT2);
+            SetBkColor(hdc, CLR_BG);
+            SetBkMode(hdc, TRANSPARENT);
+            return (LRESULT)g_brBg;
+        }
+        SetTextColor(hdc, isAccent ? CLR_PRIMARY_TX : CLR_TEXT);
+        SetBkColor(hdc, CLR_CARD);
         SetBkMode(hdc, TRANSPARENT);
-        return (LRESULT)g_brBg;
+        return (LRESULT)g_brCard;
+    }
+
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, CLR_TEXT);
+        SetBkColor(hdc, CLR_INPUT_BG);
+        return (LRESULT)g_brInput;
     }
 
     case WM_CTLCOLOREDIT: {
@@ -956,18 +1178,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        // --- Agent：刷新在线 / 组播发送 ---
+        // --- Agent：刷新在线 / 组播发送（均以顶部 IP 范围为目标）---
         if (id == IDC_BTN_AGENT_PING || id == IDC_BTN_AGENT_SEND) {
             if (g_mcast.busy()) {
                 MessageBoxW(hwnd, L"\u4e0a\u4e00\u8f6e\u56de\u6536\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u5019...", L"\u63d0\u793a", MB_ICONWARNING);
                 return 0;
             }
+            // 目标 IP 范围（随命令下发，agent 侧自检不匹配则静默忽略）
+            std::string ipRaw = getEditText(g_hEditIP);
+            if (ParseIPList(ipRaw).empty()) {
+                MessageBoxW(hwnd, L"\u8bf7\u5148\u5728\u9876\u90e8\u586b\u5199\u76ee\u6807IP\u8303\u56f4\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
+            std::string targetsKv = "\"targets\":\"" + JsonEscStr(ipRaw) + "\"";
             std::string body;
             if (id == IDC_BTN_AGENT_PING) {
-                body = "\"action\":\"ping\"";
+                body = targetsKv + ",\"action\":\"ping\"";
             } else {
                 int sel = (int)SendMessageW(g_hCmbAgentAction, CB_GETCURSEL, 0, 0);
-                std::string param = getEditText(g_hEditAgentParam);
+                std::string param = getEditTextUtf8(g_hEditAgentParam);
                 std::string esc = JsonEscStr(param);
                 auto needParam = [&]() {
                     if (param.empty()) {
@@ -977,18 +1206,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return false;
                 };
                 switch (sel) {
-                case 0:  if (needParam()) return 0; body = "\"action\":\"exec\",\"cmd\":\"" + esc + "\""; break;
-                case 1:  if (needParam()) return 0; body = "\"action\":\"exec_wait\",\"cmd\":\"" + esc + "\""; break;
-                case 2:  body = "\"action\":\"killgames\""; break;
-                case 3:  if (needParam()) return 0; body = "\"action\":\"msg\",\"text\":\"" + esc + "\""; break;
-                case 4:  if (needParam()) return 0; body = "\"action\":\"open_url\",\"url\":\"" + esc + "\""; break;
-                case 5:  body = "\"action\":\"power\",\"mode\":\"off\""; break;
-                case 6:  body = "\"action\":\"power\",\"mode\":\"reboot\""; break;
-                case 7:  body = "\"action\":\"power\",\"mode\":\"logoff\""; break;
-                case 8:  body = "\"action\":\"power\",\"mode\":\"lock\""; break;
-                case 9:  body = "\"action\":\"isolate\",\"allow_ip\":\"" + GetLocalIpForMulticast() + "\""; break;
-                case 10: body = "\"action\":\"unisolate\""; break;
-                default: body = "\"action\":\"ping\""; break;
+                case 0:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"exec\",\"cmd\":\"" + esc + "\""; break;
+                case 1:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"exec_wait\",\"cmd\":\"" + esc + "\""; break;
+                case 2:  body = targetsKv + ",\"action\":\"killgames\""; break;
+                case 3:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"msg\",\"text\":\"" + esc + "\""; break;
+                case 4:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"open_url\",\"url\":\"" + esc + "\""; break;
+                case 5:  body = targetsKv + ",\"action\":\"power\",\"mode\":\"off\""; break;
+                case 6:  body = targetsKv + ",\"action\":\"power\",\"mode\":\"reboot\""; break;
+                case 7:  body = targetsKv + ",\"action\":\"power\",\"mode\":\"logoff\""; break;
+                case 8:  body = targetsKv + ",\"action\":\"power\",\"mode\":\"lock\""; break;
+                case 9:  body = targetsKv + ",\"action\":\"isolate\",\"allow_ip\":\"" + GetLocalIpForMulticast() + "\""; break;
+                case 10: body = targetsKv + ",\"action\":\"unisolate\""; break;
+                default: body = targetsKv + ",\"action\":\"ping\""; break;
                 }
             }
             bool ok = g_mcast.start(body, 2500,
@@ -1101,12 +1330,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_UPDATE_OUTPUT: {
         OutputData* pData = reinterpret_cast<OutputData*>(lParam);
-        if (pData) {
-            std::wstring wtext = GbkToWstring(pData->text);
+        if (pData && g_hEditOutput) {
+            std::wstring wtext = ToDisplayWide(pData->text);
 
-            // Use EM_SETSEL + EM_REPLACESEL to append at end without full buffer copy
-            LONG oldEnd = GetWindowTextLengthW(g_hEditOutput);
-            SendMessageW(g_hEditOutput, EM_SETSEL, (WPARAM)oldEnd, (LPARAM)oldEnd);
+            // per-chunk color by leading marker
+            COLORREF color = CLR_TEXT;
+            const std::string& s = pData->text;
+            if (s.rfind("[+]", 0) == 0)      color = CLR_SUCCESS;
+            else if (s.rfind("[-]", 0) == 0) color = CLR_DANGER;
+            else if (s.rfind("===", 0) == 0) color = CLR_WARN;
+            else if (s.rfind("[\u56de\u6267]", 0) == 0) color = CLR_PRIMARY_TX;
+
+            LONG oldEnd = (LONG)GetWindowTextLengthW(g_hEditOutput);
+            CHARRANGE cr = { oldEnd, oldEnd };
+            SendMessageW(g_hEditOutput, EM_EXSETSEL, 0, (LPARAM)&cr);
+            CHARFORMATW cf = {};
+            cf.cbSize = sizeof(cf);
+            cf.dwMask = CFM_COLOR;
+            cf.crTextColor = color;
+            SendMessageW(g_hEditOutput, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 
             // EM_REPLACESEL needs non-readonly, temporarily clear the flag
             DWORD style = (DWORD)GetWindowLongPtrW(g_hEditOutput, GWL_STYLE);
@@ -1119,7 +1361,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
 
             // Scroll to bottom
-            SendMessageW(g_hEditOutput, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
+            SendMessageW(g_hEditOutput, EM_EXSETSEL, 0, (LPARAM)&cr);
             SendMessageW(g_hEditOutput, EM_SCROLLCARET, 0, 0);
 
             delete pData;
@@ -1153,6 +1395,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_hLblAgentOnline) {
             std::wstring t = L"\u5728\u7ebf: " + std::to_wstring(total);
             SetWindowTextW(g_hLblAgentOnline, t.c_str());
+        }
+        if (g_hStatusL) {
+            std::string st = "\u672c\u673a: " + g_localIp + "    \u5728\u7ebf: " + std::to_string(total);
+            SetWindowTextW(g_hStatusL, ToDisplayWide(st).c_str());
         }
         OutputData* d = new OutputData{"\u2014\u2014 \u56de\u6536\u5b8c\u6210: " + std::to_string(total) +
                                        " \u53f0\u5e94\u7b54 \u2014\u2014\r\n"};
@@ -1226,12 +1472,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         if (g_hProgress)
-            SetWindowPos(g_hProgress, nullptr, M, g_yProg, W, 22, SWP_NOZORDER);
+            SetWindowPos(g_hProgress, nullptr, M, g_yProg, W, 8, SWP_NOZORDER);
 
         if (g_hEditOutput) {
-            int outH = (std::max)(120, clientH - g_yOutput - 10);
+            int outH = (std::max)(120, clientH - g_yOutput - 36);
             SetWindowPos(g_hEditOutput, nullptr, M, g_yOutput, W, outH, SWP_NOZORDER);
         }
+
+        if (g_hStatusL)
+            SetWindowPos(g_hStatusL, nullptr, M, clientH - 26, clientW / 2 - M, 22, SWP_NOZORDER);
+        if (g_hStatusR)
+            SetWindowPos(g_hStatusR, nullptr, clientW / 2, clientH - 26,
+                         clientW - clientW / 2 - M, 22, SWP_NOZORDER);
 
         return 0;
     }
@@ -1288,6 +1540,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             MessageBoxW(nullptr, L"Winsock init failed", L"Error", MB_ICONERROR);
             return 1;
         }
+        g_localIp = GetLocalIpForMulticast();
 
         // Init COM (for WebView2)
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1358,8 +1611,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             h += 24 + 8 + 90 + LAYOUT_SECTION_GAP;               // 目标主机
             h += 24 + LAYOUT_INPUT_H + LAYOUT_SECTION_GAP;       // 连接配置
             h += 270 + LAYOUT_SECTION_GAP;                       // 命令/传输/Agent Tab 控件
-            h += 22 + 10;                                        // progress + gap
+            h += 8 + 10;                                         // progress + gap
             h += 24 + 180;                                       // 执行输出 label + output
+            h += 26;                                             // status bar
             int clientH = h + 12;
             int winH = clientH + 46;                             // title bar + borders
             g_hMainWnd = CreateWindowExW(0, CLASS_NAME, L"Seewo Killer",
