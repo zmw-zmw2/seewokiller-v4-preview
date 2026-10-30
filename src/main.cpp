@@ -696,7 +696,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     L"power \u6ce8\u9500",
                     L"power \u9501\u5c4f",
                     L"isolate \u7f51\u7edc\u9694\u79bb",
-                    L"unisolate \u89e3\u9664\u9694\u79bb"
+                    L"unisolate \u89e3\u9664\u9694\u79bb",
+                    L"lockinput \u7981\u7528\u952e\u9f20",
+                    L"unlockinput \u89e3\u9664\u7981\u7528"
                 };
                 for (const wchar_t* it : items)
                     SendMessageW(g_hCmbAgentAction, CB_ADDSTRING, 0, (LPARAM)it);
@@ -1217,6 +1219,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case 8:  body = targetsKv + ",\"action\":\"power\",\"mode\":\"lock\""; break;
                 case 9:  body = targetsKv + ",\"action\":\"isolate\",\"allow_ip\":\"" + GetLocalIpForMulticast() + "\""; break;
                 case 10: body = targetsKv + ",\"action\":\"unisolate\""; break;
+                case 11: body = targetsKv + ",\"action\":\"lockinput\",\"text\":\"" + esc + "\""; break;
+                case 12: body = targetsKv + ",\"action\":\"unlockinput\""; break;
                 default: body = targetsKv + ",\"action\":\"ping\""; break;
                 }
             }

@@ -284,12 +284,12 @@ static DWORD WINAPI msg_thread(LPVOID param) {
     return 0;
 }
 
-static void do_msg(const char* textUtf8) {
-    int wl = MultiByteToWideChar(CP_UTF8, 0, textUtf8, -1, NULL, 0);
+static void do_msg(const char* textAcp) {   /* text arrives ACP-converted */
+    int wl = MultiByteToWideChar(CP_ACP, 0, textAcp, -1, NULL, 0);
     if (wl <= 0) return;
     wchar_t* w = malloc((size_t)wl * sizeof(wchar_t));
     if (!w) return;
-    MultiByteToWideChar(CP_UTF8, 0, textUtf8, -1, w, wl);
+    MultiByteToWideChar(CP_ACP, 0, textAcp, -1, w, wl);
     HANDLE t = CreateThread(NULL, 0, msg_thread, w, 0, NULL);
     if (t) CloseHandle(t);
 }
@@ -318,6 +318,160 @@ static void do_power(const char* mode) {
     else if (!strcmp(mode, "reboot"))  run_hidden("shutdown /r /t 5");
     else if (!strcmp(mode, "logoff"))  run_hidden("shutdown /l");
     else if (!strcmp(mode, "lock"))    LockWorkStation();
+}
+
+/* ---------------- input lock (fullscreen overlay + BlockInput) ----------------
+ * Classroom-style lock: a topmost fullscreen window swallows local input and
+ * BlockInput() (we run elevated via the scheduled task) hardens it. Ctrl+Alt+Del
+ * stays available by design (kernel SAS). The lock lives inside the agent
+ * process, so any crash/reboot releases it - inherent fail-safe. */
+
+static HANDLE g_lockThread = NULL;      /* running lock thread handle */
+static volatile HANDLE g_lockStop = NULL;
+static wchar_t g_lockText[256] = L"\u5c4f\u5e55\u5df2\u9501\u5b9a"; /* 屏幕已锁定 */
+
+#define LOCK_TIMER_ID 1
+
+static void DrawLockText(HDC hdc, HWND hwnd) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(235, 235, 235));
+    HFONT f = CreateFontW(72, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                          CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HFONT old = (HFONT)SelectObject(hdc, f);
+    DrawTextW(hdc, g_lockText, -1, &rc,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, old);
+    DeleteObject(f);
+}
+
+static LRESULT CALLBACK LockWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        HBRUSH b = CreateSolidBrush(RGB(8, 8, 10));
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, b);
+        DeleteObject(b);
+        DrawLockText(hdc, hwnd);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wp;
+        HBRUSH b = CreateSolidBrush(RGB(8, 8, 10));
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, b);
+        DeleteObject(b);
+        return 1;
+    }
+    /* swallow everything input-related */
+    case WM_KEYDOWN: case WM_KEYUP: case WM_CHAR: case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP: case WM_SYSCHAR: case WM_SYSCOMMAND:
+        return 0;
+    case WM_CLOSE:
+        return 0;                       /* only unlock via the event */
+    default:
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+
+static DWORD WINAPI lock_thread(LPVOID param) {
+    HANDLE stop = (HANDLE)param;
+
+    WNDCLASSW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = LockWndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = L"SKLockOverlay";
+    RegisterClassW(&wc);
+
+    BlockInput(TRUE);                   /* best effort; cleared on unlock/exit */
+
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                                L"SKLockOverlay", L"",
+                                WS_POPUP | WS_VISIBLE,
+                                vx, vy, vw, vh, NULL, NULL,
+                                GetModuleHandleW(NULL), NULL);
+    if (hwnd) {
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        SetTimer(hwnd, LOCK_TIMER_ID, 500, NULL);
+        MSG msg;
+        BOOL running = TRUE;
+        while (running && GetMessageW(&msg, NULL, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if (msg.message == WM_TIMER && msg.wParam == LOCK_TIMER_ID) {
+                /* keep on top + foreground; re-assert BlockInput in case
+                 * something (SAS) cleared it */
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if (GetForegroundWindow() != hwnd) {
+                    SetForegroundWindow(hwnd);
+                    SetFocus(hwnd);
+                }
+                BlockInput(TRUE);
+                if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
+                    running = FALSE;
+            } else {
+                if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
+                    running = FALSE;
+            }
+        }
+        KillTimer(hwnd, LOCK_TIMER_ID);
+        DestroyWindow(hwnd);
+    }
+    BlockInput(FALSE);
+    UnregisterClassW(L"SKLockOverlay", GetModuleHandleW(NULL));
+    g_lockThread = NULL;
+    return 0;
+}
+
+static void do_lockinput(const char* textUtf8) {
+    if (g_lockThread) return;           /* already locked */
+
+    if (textUtf8 && textUtf8[0]) {          /* text arrives ACP-converted */
+        int wl = MultiByteToWideChar(CP_ACP, 0, textUtf8, -1, NULL, 0);
+        if (wl > 0 && wl <= (int)(sizeof(g_lockText) / sizeof(wchar_t))) {
+            wchar_t* w = (wchar_t*)malloc((size_t)wl * sizeof(wchar_t));
+            if (w) {
+                MultiByteToWideChar(CP_ACP, 0, textUtf8, -1, w, wl);
+                wcscpy(g_lockText, w);
+                free(w);
+            }
+        }
+    } else {
+        wcscpy(g_lockText, L"\u5c4f\u5e55\u5df2\u9501\u5b9a");
+    }
+
+    HANDLE stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!stop) return;
+    g_lockStop = stop;
+    g_lockThread = CreateThread(NULL, 0, lock_thread, stop, 0, NULL);
+    if (!g_lockThread) {
+        CloseHandle(stop);
+        g_lockStop = NULL;
+    }
+}
+
+static void do_unlockinput(void) {
+    if (g_lockStop) SetEvent(g_lockStop);
+    if (g_lockThread) {
+        WaitForSingleObject(g_lockThread, 3000);
+        CloseHandle(g_lockThread);
+        g_lockThread = NULL;
+    }
+    if (g_lockStop) { CloseHandle(g_lockStop); g_lockStop = NULL; }
+    wcscpy(g_lockText, L"\u5c4f\u5e55\u5df2\u9501\u5b9a");
 }
 
 static void do_isolate(const char* allowIp, int on) {
@@ -428,6 +582,12 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
     } else if (!strcmp(action, "unisolate")) {
         do_isolate("", 0);
         send_reply(&to, task_id, "ok", 0, "restored");
+    } else if (!strcmp(action, "lockinput")) {
+        do_lockinput(text);
+        send_reply(&to, task_id, "ok", 0, "locked");
+    } else if (!strcmp(action, "unlockinput")) {
+        do_unlockinput();
+        send_reply(&to, task_id, "ok", 0, "unlocked");
     } else {
         send_reply(&to, task_id, "err", -1, "unknown action");
     }
