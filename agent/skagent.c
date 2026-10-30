@@ -10,6 +10,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -474,6 +475,84 @@ static void do_unlockinput(void) {
     wcscpy(g_lockText, L"\u5c4f\u5e55\u5df2\u9501\u5b9a");
 }
 
+/* ---------------- killproc: terminate processes by name ----------------
+ * Enables SeDebugPrivilege (held but disabled in admin tokens) so SYSTEM-owned
+ * vendor processes can be terminated too. Reversible by design: a reboot or
+ * restore-card cycle brings everything back. */
+
+static int sk_enable_debug_priv(void) {
+    HANDLE tok;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
+        return 0;
+    LUID luid;
+    if (!LookupPrivilegeValueA(NULL, "SeDebugPrivilege", &luid)) {
+        CloseHandle(tok);
+        return 0;
+    }
+    TOKEN_PRIVILEGES tp;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    int ok = AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), NULL, NULL) &&
+             GetLastError() == ERROR_SUCCESS;
+    CloseHandle(tok);
+    return ok;
+}
+
+#define KILLPROC_MAX_NAMES 16
+
+/* namesAcp: comma/semicolon/space separated image names ("a.exe,b.exe").
+ * Returns number of processes terminated, or -1 on snapshot failure. */
+static int do_killproc(const char* namesAcp) {
+    if (!namesAcp[0]) return 0;
+    sk_enable_debug_priv();
+
+    int wl = MultiByteToWideChar(CP_ACP, 0, namesAcp, -1, NULL, 0);
+    if (wl <= 0) return 0;
+    wchar_t* wbuf = (wchar_t*)malloc((size_t)wl * sizeof(wchar_t));
+    if (!wbuf) return 0;
+    MultiByteToWideChar(CP_ACP, 0, namesAcp, -1, wbuf, wl);
+
+    wchar_t* names[KILLPROC_MAX_NAMES];
+    int nn = 0;
+    wchar_t* ctx = NULL;
+    for (wchar_t* tok = wcstok_s(wbuf, L",; \t", &ctx);
+         tok && nn < KILLPROC_MAX_NAMES;
+         tok = wcstok_s(NULL, L",; \t", &ctx))
+        names[nn++] = tok;
+
+    int killed = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe;
+        pe.dwSize = sizeof(pe);
+        DWORD me = GetCurrentProcessId();
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (pe.th32ProcessID == me) continue;   /* never self-kill */
+                for (int i = 0; i < nn; ++i) {
+                    if (!_wcsicmp(pe.szExeFile, names[i])) {
+                        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                                               pe.th32ProcessID);
+                        if (h) {
+                            if (TerminateProcess(h, 1)) killed++;
+                            CloseHandle(h);
+                        }
+                        break;
+                    }
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    } else {
+        free(wbuf);
+        return -1;
+    }
+    free(wbuf);
+    return killed;
+}
+
 static void do_isolate(const char* allowIp, int on) {
     char buf[1400];
     if (on) {
@@ -516,13 +595,14 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
     long long rport   = sk_json_get_int(json, "reply_port", 0);
 
     char action[32] = "", cmd[900] = "", text[512] = "", url[600] = "";
-    char mode[16] = "", allow_ip[40] = "";
+    char mode[16] = "", allow_ip[40] = "", proc[300] = "";
     sk_json_get_str(json, "action", action, sizeof(action));
     sk_json_get_str(json, "cmd", cmd, sizeof(cmd));
     sk_json_get_str(json, "text", text, sizeof(text));
     sk_json_get_str(json, "url", url, sizeof(url));
     sk_json_get_str(json, "mode", mode, sizeof(mode));
     sk_json_get_str(json, "allow_ip", allow_ip, sizeof(allow_ip));
+    sk_json_get_str(json, "proc", proc, sizeof(proc));
 
     /* Protocol strings are UTF-8; ANSI execution paths want console ACP. */
     {
@@ -532,6 +612,8 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
         if (text[0] && utf8_to_acp(text, conv2, sizeof(conv2)) == 0) strcpy(text, conv2);
         char conv3[600];
         if (url[0] && utf8_to_acp(url, conv3, sizeof(conv3)) == 0) strcpy(url, conv3);
+        char conv4[300];
+        if (proc[0] && utf8_to_acp(proc, conv4, sizeof(conv4)) == 0) strcpy(proc, conv4);
     }
 
     /* reply destination: dynamic port from the command, controller address */
@@ -568,6 +650,14 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
     } else if (!strcmp(action, "killmc") || !strcmp(action, "killgames")) {
         do_killmc();
         send_reply(&to, task_id, "ok", 0, "java killed");
+    } else if (!strcmp(action, "killproc")) {
+        int n = do_killproc(proc);
+        if (n < 0) send_reply(&to, task_id, "err", -1, "snapshot failed");
+        else {
+            char ib[32];
+            _snprintf(ib, sizeof(ib), "killed %d", n);
+            send_reply(&to, task_id, "ok", 0, ib);
+        }
     } else if (!strcmp(action, "msg")) {
         do_msg(text);
         send_reply(&to, task_id, "ok", 0, "shown");
