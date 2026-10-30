@@ -698,8 +698,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     L"isolate \u7f51\u7edc\u9694\u79bb",
                     L"unisolate \u89e3\u9664\u9694\u79bb",
                     L"lockinput \u7981\u7528\u952e\u9f20",
-                    L"unlockinput \u89e3\u9664\u7981\u7528",
-                    L"killproc \u6740\u6307\u5b9a\u8fdb\u7a0b"
+                    L"unlockinput \u89e3\u9664\u7981\u7528"
                 };
                 for (const wchar_t* it : items)
                     SendMessageW(g_hCmbAgentAction, CB_ADDSTRING, 0, (LPARAM)it);
@@ -728,7 +727,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_agentTabControls.push_back(g_hBtnAgentSend);
 
             hLbl = CreateWindowW(L"STATIC",
-                L"\u53c2\u6570: exec/exec_wait=\u547d\u4ee4, msg/lockinput=\u6587\u5b57, open_url=\u7f51\u5740, killproc=\u8fdb\u7a0b\u540d(\u9017\u53f7\u5206\u9694), \u5176\u4f59\u7559\u7a7a; \u4ec5\u5bf9\u4e0a\u65b9IP\u8303\u56f4\u5185\u7684\u4e3b\u673a\u751f\u6548",
+                L"\u53c2\u6570: exec/exec_wait=\u547d\u4ee4, msg=\u6587\u5b57, open_url=\u7f51\u5740, \u5176\u4f59\u7559\u7a7a; \u6240\u6709\u52a8\u4f5c\u4ec5\u5bf9\u4e0a\u65b9IP\u8303\u56f4\u5185\u7684\u4e3b\u673a\u751f\u6548, \u56de\u6267\u663e\u793a\u5728\u4e0b\u65b9\u8f93\u51fa\u533a",
                 WS_VISIBLE | WS_CHILD, cx, contentY + 92, contentW, 18, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
@@ -1222,7 +1221,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case 10: body = targetsKv + ",\"action\":\"unisolate\""; break;
                 case 11: body = targetsKv + ",\"action\":\"lockinput\",\"text\":\"" + esc + "\""; break;
                 case 12: body = targetsKv + ",\"action\":\"unlockinput\""; break;
-                case 13: if (needParam()) return 0; body = targetsKv + ",\"action\":\"killproc\",\"proc\":\"" + esc + "\""; break;
                 default: body = targetsKv + ",\"action\":\"ping\""; break;
                 }
             }
