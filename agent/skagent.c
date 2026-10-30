@@ -492,9 +492,10 @@ static void do_isolate(const char* allowIp, int on) {
     run_hidden(buf);
 }
 
-static void do_killgames(void) {
-    run_hidden("taskkill /F /T /IM msedge.exe >nul 2>&1"
-               " & taskkill /F /T /IM java.exe >nul 2>&1"
+/* Java-only kill (MC and browser games launch java/javaw); Edge is NOT touched.
+ * "killgames" is kept as a legacy alias with the same Java-only behavior. */
+static void do_killmc(void) {
+    run_hidden("taskkill /F /T /IM java.exe >nul 2>&1"
                " & taskkill /F /T /IM javaw.exe >nul 2>&1");
 }
 
@@ -564,9 +565,9 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
                   rc, (unsigned)outLen, utf8);
         info[sizeof(info) - 1] = '\0';
         send_reply(&to, task_id, "ok", rc, info);
-    } else if (!strcmp(action, "killgames")) {
-        do_killgames();
-        send_reply(&to, task_id, "ok", 0, "edge+java killed");
+    } else if (!strcmp(action, "killmc") || !strcmp(action, "killgames")) {
+        do_killmc();
+        send_reply(&to, task_id, "ok", 0, "java killed");
     } else if (!strcmp(action, "msg")) {
         do_msg(text);
         send_reply(&to, task_id, "ok", 0, "shown");

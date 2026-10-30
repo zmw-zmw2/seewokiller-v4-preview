@@ -688,7 +688,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const wchar_t* items[] = {
                     L"exec \u6267\u884c\u547d\u4ee4",
                     L"exec_wait \u53d6\u7ed3\u679c",
-                    L"killgames \u6740\u6e38\u620f",
+                    L"killmc \u6740Java/MC",
                     L"msg \u5f39\u516c\u544a",
                     L"open_url \u5f00\u7f51\u9875",
                     L"power \u5173\u673a",
@@ -1210,7 +1210,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 switch (sel) {
                 case 0:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"exec\",\"cmd\":\"" + esc + "\""; break;
                 case 1:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"exec_wait\",\"cmd\":\"" + esc + "\""; break;
-                case 2:  body = targetsKv + ",\"action\":\"killgames\""; break;
+                case 2:  body = targetsKv + ",\"action\":\"killmc\""; break;
                 case 3:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"msg\",\"text\":\"" + esc + "\""; break;
                 case 4:  if (needParam()) return 0; body = targetsKv + ",\"action\":\"open_url\",\"url\":\"" + esc + "\""; break;
                 case 5:  body = targetsKv + ",\"action\":\"power\",\"mode\":\"off\""; break;
