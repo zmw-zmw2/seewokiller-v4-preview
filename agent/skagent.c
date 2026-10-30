@@ -22,6 +22,7 @@
 #define AGENT_DIR      "C:\\Temp\\SK"
 #define KEY_FILE       "C:\\Temp\\SK\\key.bin"
 #define EDGE_PATH      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+#define AGENT_VERSION  "4.2"   /* bump this on every agent change; shown in ping replies */
 
 static uint8_t  g_key[SK_HMAC_LEN];
 static char     g_host[64] = "?";
@@ -545,7 +546,7 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
     }
 
     if (!strcmp(action, "ping")) {
-        send_reply(&to, task_id, "ok", 0, "alive");
+        send_reply(&to, task_id, "ok", 0, "alive v" AGENT_VERSION);
     } else if (!strcmp(action, "exec")) {
         run_hidden(cmd);
         send_reply(&to, task_id, "ok", 0, "started");
