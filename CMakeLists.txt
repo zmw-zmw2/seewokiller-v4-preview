@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
-project(SeewoKiller LANGUAGES C CXX)
+
+# Single source of truth for the version: the VERSION file at repo root.
+# setup.iss must carry the same value (build_release.bat verifies this).
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" APP_VERSION)
+string(STRIP "${APP_VERSION}" APP_VERSION)
+
+project(SeewoKiller VERSION ${APP_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -96,6 +102,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 # Resident agent: single static-linked exe, pure C, no third-party deps.
 add_executable(skagent WIN32 agent/skagent.c src/sk_protocol.c)
 target_include_directories(skagent PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(skagent PRIVATE SK_VERSION="${APP_VERSION}")
 target_link_libraries(skagent PRIVATE ws2_32 user32 bcrypt)
 set_target_properties(skagent PROPERTIES OUTPUT_NAME skagent)
 
@@ -106,3 +113,10 @@ add_custom_command(TARGET skagent POST_BUILD
             $<TARGET_FILE_DIR:SeewoKiller>
     COMMENT "Copying skagent.exe next to SeewoKiller"
 )
+
+# ---------------- protocol unit tests (ctest) ----------------
+enable_testing()
+add_executable(sk_protocol_test tests/test_protocol.c src/sk_protocol.c)
+target_include_directories(sk_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(sk_protocol_test PRIVATE bcrypt)
+add_test(NAME protocol COMMAND sk_protocol_test)
