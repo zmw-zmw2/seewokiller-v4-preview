@@ -1642,6 +1642,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_CLOSE: {
+        // async ops (deploy/scp threads) still touch g_sshExecutor:
+        // refuse to close while one is running, or we use-after-free
+        if (g_opBusy.load()) {
+            MessageBoxW(hwnd, L"\u540e\u53f0\u64cd\u4f5c\uff08\u90e8\u7f72/\u4f20\u8f93\uff09\u8fdb\u884c\u4e2d\uff0c\u5b8c\u6210\u540e\u518d\u5173\u95ed\u3002",
+                        L"\u8bf7\u7a0d\u5019", MB_ICONWARNING);
+            return 0;
+        }
         // Graceful shutdown: stop background operations first
         WriteLog("WM_CLOSE received, stopping background operations");
         if (g_sshExecutor) {
