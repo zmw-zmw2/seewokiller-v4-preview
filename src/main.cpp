@@ -81,7 +81,6 @@ const COLORREF CLR_BTN_PRESS  = RGB(29, 34, 46);
 #define IDC_BTN_SCP_RUN       2029
 #define IDC_BTN_KEY_EXPORT    2033
 #define IDC_BTN_KEY_IMPORT    2034
-#define IDC_BTN_PORT_CHECK    2035
 #define IDC_STATUS_L          2030
 #define IDC_STATUS_R          2031
 
@@ -138,7 +137,7 @@ static uint8_t g_agentKey[SK_HMAC_LEN] = {0};
 static std::string g_keyPath, g_agentExePath;
 static McastController g_mcast;
 static std::atomic<bool> g_opBusy{false};
-static HWND g_hBtnKeyExport, g_hBtnKeyImport, g_hBtnPortCheck;
+static HWND g_hBtnKeyExport, g_hBtnKeyImport;
 
 // 状态栏 + 高亮文本控件
 static HWND g_hStatusL, g_hStatusR;
@@ -411,31 +410,6 @@ static bool ActionNeedsParam(int sel) {
     return sel == 0 || sel == 1 || sel == 3 || sel == 4 || sel == 11;
 }
 
-// TCP port probe (ICMP ping is disabled on the classroom net)
-static std::string PortCheckHost(const std::string& ip, unsigned short port, int timeoutMs) {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) return "err";
-    u_long nb = 1;
-    ioctlsocket(s, FIONBIO, &nb);
-    sockaddr_in a;
-    ZeroMemory(&a, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = inet_addr(ip.c_str());
-    a.sin_port = htons(port);
-    int r = connect(s, (sockaddr*)&a, sizeof(a));
-    bool ok = (r == 0);
-    if (!ok && WSAGetLastError() == WSAEWOULDBLOCK) {
-        fd_set w;
-        FD_ZERO(&w);
-        FD_SET(s, &w);
-        timeval tv;
-        tv.tv_sec = timeoutMs / 1000;
-        tv.tv_usec = (timeoutMs % 1000) * 1000;
-        ok = (select(0, nullptr, &w, nullptr, &tv) > 0);
-    }
-    closesocket(s);
-    return ok ? "\u5f00" : "\u5173";
-}
 
 static std::string JsonEscStr(const std::string& in) {
     char buf[4096];
@@ -729,13 +703,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetModuleHandle(nullptr), nullptr);
             MakeHoverButton(g_hBtnAgentPing);
             g_agentTabControls.push_back(g_hBtnAgentPing);
-
-            g_hBtnPortCheck = CreateWindowW(L"BUTTON", L"\u7aef\u53e3\u4f53\u68c0",
-                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-                cx + 408, ay, 76, 30, hwnd, (HMENU)IDC_BTN_PORT_CHECK,
-                GetModuleHandle(nullptr), nullptr);
-            MakeHoverButton(g_hBtnPortCheck);
-            g_agentTabControls.push_back(g_hBtnPortCheck);
 
             g_hBtnKeyExport = CreateWindowW(L"BUTTON", L"\u5bfc\u51fa",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
@@ -1409,42 +1376,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_sshExecutor->executeScpPush(ips, username, password, localPath, target);
                 AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 2/2: schtasks \u5728\u684c\u9762\u4f1a\u8bdd\u542f\u52a8 ===\r\n");
                 g_sshExecutor->executeNow(ips, username, password, BuildScpRunCommand(target));
-                PostMessage(g_hMainWnd, WM_OP_DONE, 0, 0);
-            }).detach();
-            return 0;
-        }
-
-        // --- 端口体检：TCP 22/5900 逐台探测（ICMP 被禁，ping 不可用）---
-        if (id == IDC_BTN_PORT_CHECK) {
-            std::string ipStr = getEditText(g_hEditIP);
-            auto ips = ParseIPList(ipStr);
-            if (ips.empty()) {
-                MessageBoxW(hwnd, L"\u672a\u89e3\u6790\u5230\u6709\u6548IP\uff01", L"\u63d0\u793a", MB_ICONWARNING);
-                return 0;
-            }
-            if (g_opBusy.load()) {
-                MessageBoxW(hwnd, L"\u64cd\u4f5c\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u5019\uff01", L"\u63d0\u793a", MB_ICONWARNING);
-                return 0;
-            }
-            g_opBusy.store(true);
-            AppendOutput("=== \u7aef\u53e3\u4f53\u68c0: TCP 22(SSH) / 5900(VNC), \u4ec5\u63a2\u6d4b IP \u8303\u56f4\u5185\u4e3b\u673a ===\r\n");
-            std::thread([ips]() {
-                std::atomic<size_t> next{0};
-                auto worker = [&]() {
-                    for (;;) {
-                        size_t i = next.fetch_add(1);
-                        if (i >= ips.size()) break;
-                        const std::string& ip = ips[i];
-                        std::string ssh = PortCheckHost(ip, 22, 600);
-                        std::string vnc = PortCheckHost(ip, 5900, 600);
-                        AppendOutput("[\u7aef\u53e3] " + ip + "  SSH:" + ssh + "  VNC:" + vnc + "\r\n");
-                    }
-                };
-                std::vector<std::thread> ws;
-                int n = ips.size() < 8 ? (int)ips.size() : 8;
-                for (int k = 0; k < n; ++k) ws.emplace_back(worker);
-                for (auto& t : ws) if (t.joinable()) t.join();
-                AppendOutput("=== \u7aef\u53e3\u4f53\u68c0\u5b8c\u6210 ===\r\n");
                 PostMessage(g_hMainWnd, WM_OP_DONE, 0, 0);
             }).detach();
             return 0;
