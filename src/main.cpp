@@ -1276,6 +1276,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 default: body = targetsKv + ",\"action\":\"ping\""; break;
                 }
             }
+            // destructive actions get a confirm dialog (default focus = No)
+            if (sel == 5 || sel == 6 || sel == 7 || sel == 9 || sel == 11) {
+                wchar_t item[128] = {0};
+                SendMessageW(g_hCmbAgentAction, CB_GETLBTEXT, sel, (LPARAM)item);
+                std::wstring msg = std::wstring(L"\u5373\u5c06\u5bf9 IP \u8303\u56f4\u5185\u6240\u6709\u673a\u5668\u6267\u884c\uff1a")
+                                 + item + L"\n\u786e\u8ba4\u6267\u884c\uff1f";
+                if (MessageBoxW(hwnd, msg.c_str(), L"\u4e8c\u6b21\u786e\u8ba4",
+                                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+                    return 0;
+            }
+
             bool ok = g_mcast.start(body, 2500,
                 [](const McastReply& r) {
                     auto* p = new McastReply(r);
