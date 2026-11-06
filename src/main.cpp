@@ -79,6 +79,8 @@ const COLORREF CLR_BTN_PRESS  = RGB(29, 34, 46);
 #define IDC_EDIT_AGENT_PARAM  2027
 #define IDC_BTN_AGENT_SEND    2028
 #define IDC_BTN_SCP_RUN       2029
+#define IDC_BTN_KEY_EXPORT    2033
+#define IDC_BTN_KEY_IMPORT    2034
 #define IDC_STATUS_L          2030
 #define IDC_STATUS_R          2031
 
@@ -92,6 +94,7 @@ const COLORREF CLR_BTN_PRESS  = RGB(29, 34, 46);
 #define WM_MCAST_REPLY     (WM_USER + 102)
 #define WM_MCAST_DONE      (WM_USER + 103)
 #define WM_SELFPROTECT     (WM_USER + 104)
+#define WM_OP_DONE         (WM_USER + 105)
 
 // ==================== Context Menu IDs ====================
 #define IDM_CUT       3101
@@ -133,6 +136,8 @@ static int g_yAgentRow = 0;
 static uint8_t g_agentKey[SK_HMAC_LEN] = {0};
 static std::string g_keyPath, g_agentExePath;
 static McastController g_mcast;
+static std::atomic<bool> g_opBusy{false};
+static HWND g_hBtnKeyExport, g_hBtnKeyImport;
 
 // 状态栏 + 高亮文本控件
 static HWND g_hStatusL, g_hStatusR;
@@ -377,6 +382,17 @@ static std::string GetLocalIpForMulticast() {
     }
     closesocket(s);
     return ip;
+}
+
+// Online label with key fingerprint, so two consoles can verify key match
+static void SetOnlineLabel(int online) {
+    if (!g_hLblAgentOnline) return;
+    std::wstring t = L"\u5728\u7ebf: ";
+    t += (online < 0) ? L"--" : std::to_wstring(online);
+    t += L"  \u5bc6\u94a5:";
+    wchar_t buf[8];
+    for (int i = 0; i < 4; ++i) { swprintf(buf, 8, L"%02X", g_agentKey[i]); t += buf; }
+    SetWindowTextW(g_hLblAgentOnline, t.c_str());
 }
 
 static std::string JsonEscStr(const std::string& in) {
@@ -659,7 +675,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_agentTabControls.push_back(g_hBtnAgentDeploy);
 
             g_hLblAgentOnline = CreateWindowW(L"STATIC", L"\u5728\u7ebf: --",
-                WS_VISIBLE | WS_CHILD, cx + 170, ay + 8, 120, 20, hwnd, nullptr,
+                WS_VISIBLE | WS_CHILD, cx + 170, ay + 8, 230, 20, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(g_hLblAgentOnline, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
             g_accentStatics.push_back(g_hLblAgentOnline);
@@ -671,6 +687,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetModuleHandle(nullptr), nullptr);
             MakeHoverButton(g_hBtnAgentPing);
             g_agentTabControls.push_back(g_hBtnAgentPing);
+
+            g_hBtnKeyExport = CreateWindowW(L"BUTTON", L"\u5bfc\u51fa\u5bc6\u94a5",
+                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+                cx + 408, ay, 76, 30, hwnd, (HMENU)IDC_BTN_KEY_EXPORT,
+                GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnKeyExport);
+            g_agentTabControls.push_back(g_hBtnKeyExport);
+
+            g_hBtnKeyImport = CreateWindowW(L"BUTTON", L"\u5bfc\u5165\u5bc6\u94a5",
+                WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+                cx + 490, ay, 76, 30, hwnd, (HMENU)IDC_BTN_KEY_IMPORT,
+                GetModuleHandle(nullptr), nullptr);
+            MakeHoverButton(g_hBtnKeyImport);
+            g_agentTabControls.push_back(g_hBtnKeyImport);
+
+            SetOnlineLabel(-1);
 
             ay = contentY + 50;
             HWND hLbl = CreateWindowW(L"STATIC", L"\u52a8\u4f5c",
@@ -1074,6 +1106,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (id == IDC_BTN_SCP_PUSH || id == IDC_BTN_SCP_PULL) {
+            if (g_opBusy.load()) {
+                MessageBoxW(hwnd, L"\u64cd\u4f5c\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u5019\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
             if (g_sshExecutor && g_sshExecutor->isRunning()) {
                 MessageBoxW(hwnd, L"\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u5148\u505c\u6b62\uff01", L"\u63d0\u793a", MB_ICONWARNING);
                 return 0;
@@ -1120,18 +1156,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetWindowTextW(g_hEditOutput, L"");
             SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
 
-            if (id == IDC_BTN_SCP_PUSH) {
-                WriteLog("SCP push: " + std::to_string(ips.size()) + " targets");
-                g_sshExecutor->executeScpPush(ips, username, password, localPath, remotePath);
-            } else {
-                WriteLog("SCP pull (first success): " + std::to_string(ips.size()) + " targets");
-                g_sshExecutor->executeScpPull(ips, username, password, remotePath, localPath);
-            }
+            g_opBusy.store(true);
+            std::thread([ips, username, password, localPath, remotePath, id]() {
+                if (id == IDC_BTN_SCP_PUSH) {
+                    WriteLog("SCP push: " + std::to_string(ips.size()) + " targets");
+                    g_sshExecutor->executeScpPush(ips, username, password, localPath, remotePath);
+                } else {
+                    WriteLog("SCP pull (first success): " + std::to_string(ips.size()) + " targets");
+                    g_sshExecutor->executeScpPull(ips, username, password, remotePath, localPath);
+                }
+                PostMessage(g_hMainWnd, WM_OP_DONE, 0, 0);
+            }).detach();
             return 0;
         }
 
         // --- Agent 分发：一键部署 ---
         if (id == IDC_BTN_AGENT_DEPLOY) {
+            if (g_opBusy.load()) {
+                MessageBoxW(hwnd, L"\u64cd\u4f5c\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u5019\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
             if (g_sshExecutor && g_sshExecutor->isRunning()) {
                 MessageBoxW(hwnd, L"\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u5148\u505c\u6b62\uff01", L"\u63d0\u793a", MB_ICONWARNING);
                 return 0;
@@ -1157,26 +1201,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             SetWindowTextW(g_hEditOutput, L"");
             SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
-            WriteLog("Agent deploy 1/3: dirs + firewall");
-            AppendOutput("=== Agent \u90e8\u7f72 1/3: \u521b\u5efa\u76ee\u5f55 + \u9632\u706b\u5899\u653e\u884c ===\r\n");
-            g_sshExecutor->executeNow(ips, username, password,
-                "md C:\\Temp\\SK >nul 2>&1 & "
-                "netsh advfirewall firewall delete rule name=SKAgentIn >nul 2>&1 & "
-                "netsh advfirewall firewall add rule name=SKAgentIn dir=in action=allow program=C:\\Temp\\SK\\skagent.exe & "
-                "netsh advfirewall firewall add rule name=SKAgentUDP dir=in action=allow protocol=UDP localport=47381");
+            g_opBusy.store(true);
+            SetWindowTextW(g_hBtnAgentDeploy, L"\u90e8\u7f72\u4e2d...");
+            // 3-phase deploy on a worker thread: UI must not freeze
+            // (frozen window looked dead -> second console opened -> key clash)
+            std::thread([ips, username, password]() {
+                WriteLog("Agent deploy 1/3: kill old + dirs + firewall");
+                AppendOutput("=== Agent \u90e8\u7f72 1/3: \u6740\u65e7\u8fdb\u7a0b + \u521b\u5efa\u76ee\u5f55 + \u9632\u706b\u5899\u653e\u884c ===\r\n");
+                g_sshExecutor->executeNow(ips, username, password,
+                    "taskkill /IM skagent.exe /F >nul 2>&1 & "
+                    "md C:\\Temp\\SK >nul 2>&1 & "
+                    "netsh advfirewall firewall delete rule name=SKAgentIn >nul 2>&1 & "
+                    "netsh advfirewall firewall add rule name=SKAgentIn dir=in action=allow program=C:\\Temp\\SK\\skagent.exe & "
+                    "netsh advfirewall firewall add rule name=SKAgentUDP dir=in action=allow protocol=UDP localport=47381");
 
-            WriteLog("Agent deploy 2/3: push agent + key");
-            AppendOutput("=== Agent \u90e8\u7f72 2/3: \u63a8\u9001 skagent.exe + key.bin ===\r\n");
-            g_sshExecutor->executeScpPush(ips, username, password, g_agentExePath, "C:/Temp/SK/skagent.exe");
-            g_sshExecutor->executeScpPush(ips, username, password, g_keyPath, "C:/Temp/SK/key.bin");
+                WriteLog("Agent deploy 2/3: push agent + key");
+                AppendOutput("=== Agent \u90e8\u7f72 2/3: \u63a8\u9001 skagent.exe + key.bin ===\r\n");
+                g_sshExecutor->executeScpPush(ips, username, password, g_agentExePath, "C:/Temp/SK/skagent.exe");
+                g_sshExecutor->executeScpPush(ips, username, password, g_keyPath, "C:/Temp/SK/key.bin");
 
-            WriteLog("Agent deploy 3/3: schtasks ONLOGON HIGHEST + run");
-            AppendOutput("=== Agent \u90e8\u7f72 3/3: \u6ce8\u518c ONLOGON \u4efb\u52a1(HIGHEST) \u5e76\u542f\u52a8 ===\r\n");
-            g_sshExecutor->executeNow(ips, username, password,
-                "schtasks /Create /F /TN SeewoAgent /TR C:\\Temp\\SK\\skagent.exe /SC ONLOGON /RL HIGHEST /IT & "
-                "schtasks /Run /TN SeewoAgent");
+                WriteLog("Agent deploy 3/3: schtasks ONLOGON HIGHEST + run");
+                AppendOutput("=== Agent \u90e8\u7f72 3/3: \u6ce8\u518c ONLOGON \u4efb\u52a1(HIGHEST) \u5e76\u542f\u52a8 ===\r\n");
+                g_sshExecutor->executeNow(ips, username, password,
+                    "schtasks /Create /F /TN SeewoAgent /TR C:\\Temp\\SK\\skagent.exe /SC ONLOGON /RL HIGHEST /IT & "
+                    "schtasks /Run /TN SeewoAgent");
 
-            AppendOutput("=== \u90e8\u7f72\u5b8c\u6210, \u70b9\u51fb [\u5237\u65b0\u5728\u7ebf] \u9a8c\u8bc1 ===\r\n");
+                AppendOutput("=== \u90e8\u7f72\u5b8c\u6210, \u70b9\u51fb [\u5237\u65b0\u5728\u7ebf] \u9a8c\u8bc1 ===\r\n");
+                PostMessage(g_hMainWnd, WM_OP_DONE, 0, 0);
+            }).detach();
             return 0;
         }
 
@@ -1242,6 +1294,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // --- 上传并运行（SFTP 推送 + schtasks 在桌面会话启动）---
         if (id == IDC_BTN_SCP_RUN) {
+            if (g_opBusy.load()) {
+                MessageBoxW(hwnd, L"\u64cd\u4f5c\u8fdb\u884c\u4e2d\uff0c\u8bf7\u7a0d\u5019\uff01", L"\u63d0\u793a", MB_ICONWARNING);
+                return 0;
+            }
             if (g_sshExecutor && g_sshExecutor->isRunning()) {
                 MessageBoxW(hwnd, L"\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u5148\u505c\u6b62\uff01", L"\u63d0\u793a", MB_ICONWARNING);
                 return 0;
@@ -1279,10 +1335,61 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             SetWindowTextW(g_hEditOutput, L"");
             SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
-            AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 1/2: SFTP \u63a8\u9001 ===\r\n");
-            g_sshExecutor->executeScpPush(ips, username, password, localPath, target);
-            AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 2/2: schtasks \u5728\u684c\u9762\u4f1a\u8bdd\u542f\u52a8 ===\r\n");
-            g_sshExecutor->executeNow(ips, username, password, BuildScpRunCommand(target));
+            g_opBusy.store(true);
+            std::thread([ips, username, password, localPath, target]() {
+                AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 1/2: SFTP \u63a8\u9001 ===\r\n");
+                g_sshExecutor->executeScpPush(ips, username, password, localPath, target);
+                AppendOutput("=== \u4e0a\u4f20\u5e76\u8fd0\u884c 2/2: schtasks \u5728\u684c\u9762\u4f1a\u8bdd\u542f\u52a8 ===\r\n");
+                g_sshExecutor->executeNow(ips, username, password, BuildScpRunCommand(target));
+                PostMessage(g_hMainWnd, WM_OP_DONE, 0, 0);
+            }).detach();
+            return 0;
+        }
+
+        // --- key export/import: multi-console alignment ---
+        if (id == IDC_BTN_KEY_EXPORT) {
+            wchar_t szFile[MAX_PATH] = {0};
+            OPENFILENAMEW ofn = {0};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrFilter = L"key.bin\0key.bin\0*.*\0*.*\0";
+            ofn.lpstrDefExt = L"bin";
+            ofn.Flags = OFN_OVERWRITEPROMPT;
+            if (GetSaveFileNameW(&ofn)) {
+                std::ofstream f(WstringToGbk(szFile), std::ios::binary | std::ios::trunc);
+                f.write((const char*)g_agentKey, SK_HMAC_LEN);
+                MessageBoxW(hwnd, L"\u5bc6\u94a5\u5df2\u5bfc\u51fa\u3002\u53e6\u4e00\u53f0\u63a7\u5236\u53f0\u7528[\u5bfc\u5165\u5bc6\u94a5]\u9009\u62e9\u6b64\u6587\u4ef6\u5373\u53ef\u5bf9\u9f50\u3002",
+                            L"\u5b8c\u6210", MB_ICONINFORMATION);
+            }
+            return 0;
+        }
+        if (id == IDC_BTN_KEY_IMPORT) {
+            wchar_t szFile[MAX_PATH] = {0};
+            OPENFILENAMEW ofn = {0};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrFilter = L"key.bin\0key.bin\0*.*\0*.*\0";
+            ofn.Flags = OFN_FILEMUSTEXIST;
+            if (GetOpenFileNameW(&ofn)) {
+                std::ifstream f(WstringToGbk(szFile), std::ios::binary);
+                uint8_t k[SK_HMAC_LEN] = {0};
+                f.read((char*)k, SK_HMAC_LEN);
+                if (f.gcount() == SK_HMAC_LEN) {
+                    memcpy(g_agentKey, k, SK_HMAC_LEN);
+                    std::ofstream of(g_keyPath, std::ios::binary | std::ios::trunc);
+                    of.write((const char*)g_agentKey, SK_HMAC_LEN);
+                    g_mcast.setKey(g_agentKey);
+                    SetOnlineLabel(-1);
+                    MessageBoxW(hwnd, L"\u5bc6\u94a5\u5df2\u5bfc\u5165\u5e76\u751f\u6548\u3002\u82e5 agent \u662f\u53e6\u4e00\u628a\u94a5\u5319\u90e8\u7f72\u7684\uff0c\u91cd\u65b0\u4e00\u952e\u90e8\u7f72\u4e00\u6b21\u5373\u53ef\u3002",
+                                L"\u5b8c\u6210", MB_ICONINFORMATION);
+                } else {
+                    MessageBoxW(hwnd, L"\u5bc6\u94a5\u6587\u4ef6\u65e0\u6548(\u9700 32 \u5b57\u8282)\uff01", L"\u9519\u8bef", MB_ICONERROR);
+                }
+            }
             return 0;
         }
 
@@ -1386,7 +1493,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         McastReply* r = reinterpret_cast<McastReply*>(lParam);
         if (r) {
             std::string line = "[\u56de\u6267] " + r->ip + " " + r->host + " st=" + r->st +
-                               " rc=" + std::to_string(r->rc) + " " + r->info + "\r\n";
+                               " rc=" + std::to_string(r->rc) + " " + r->info;
+            if (r->st == "ok" && r->info == "alive")
+                line += " [\u65e7\u7248agent]";
+            line += "\r\n";
             OutputData* d = new OutputData{line};
             SendMessageW(hwnd, WM_UPDATE_OUTPUT, 0, (LPARAM)d);
             delete r;
@@ -1396,10 +1506,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_MCAST_DONE: {
         int total = (int)wParam;
-        if (g_hLblAgentOnline) {
-            std::wstring t = L"\u5728\u7ebf: " + std::to_wstring(total);
-            SetWindowTextW(g_hLblAgentOnline, t.c_str());
-        }
+        SetOnlineLabel(total);
         if (g_hStatusL) {
             std::string st = "\u672c\u673a: " + g_localIp + "    \u5728\u7ebf: " + std::to_string(total);
             SetWindowTextW(g_hStatusL, ToDisplayWide(st).c_str());
@@ -1417,6 +1524,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessageW(hwnd, WM_UPDATE_OUTPUT, 0, (LPARAM)d);
             delete s;
         }
+        return 0;
+    }
+
+    case WM_OP_DONE: {
+        g_opBusy.store(false);
+        if (g_hBtnAgentDeploy)
+            SetWindowTextW(g_hBtnAgentDeploy, L"\u4e00\u952e\u90e8\u7f72\u5230\u5168\u90e8");
         return 0;
     }
 

@@ -206,9 +206,11 @@ static int sk_parse_range_item(const char* item, size_t len,
         if (!lastdot) return 0;
         size_t keep = (size_t)(lastdot - buf) + 1;
         if (keep + sl >= sizeof(buf)) return 0;
+        /* copy suffix first, terminate after: placing the NUL before the
+         * memmove puts it inside the copy source and truncates the result
+         * ("1-254" once parsed as up to ".2" - real bug found by test) */
+        memmove(buf + keep, suffix, sl);
         buf[keep + sl] = '\0';
-        memmove(buf + keep + sl - sl, suffix, sl);   /* place suffix after prefix */
-        /* buf now reads "a.b.c." + suffix (bytes after keep+sl are cut) */
         if (!sk_parse_v4(buf, &b)) return 0;
     }
     *lo = a < b ? a : b;
@@ -236,25 +238,28 @@ static int sk_ip_in_targets(uint32_t ip, const char* targets) {
     return 0;
 }
 
-/* 1 = this host matches the targets list; empty list = no filter. */
+/* 1 = this host matches the targets list; empty list = no filter;
+ * -1 = could not determine own IPv4 (caller replies err instead of the
+ * silent drop, so a deployed-but-unreachable agent is diagnosable). */
 static int sk_host_matches_targets(const char* targets) {
     while (*targets && sk_is_target_sep(*targets)) targets++;
     if (!targets[0]) return 1;
 
     char host[256];
-    if (gethostname(host, (int)sizeof(host)) != 0) return 0;
+    if (gethostname(host, (int)sizeof(host)) != 0) return -1;
     struct addrinfo hints, *res = NULL;
     ZeroMemory(&hints, sizeof(hints));
     hints.ai_family = AF_INET;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0) return 0;
-    int hit = 0;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0) return -1;
+    int hit = 0, any = 0;
     for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
         if (ai->ai_family != AF_INET || !ai->ai_addr) continue;
+        any = 1;
         uint32_t ip = ntohl(((struct sockaddr_in*)ai->ai_addr)->sin_addr.s_addr);
         if (sk_ip_in_targets(ip, targets)) { hit = 1; break; }
     }
     freeaddrinfo(res);
-    return hit;
+    return hit ? 1 : (any ? 0 : -1);
 }
 
 /* ---------------- replies ---------------- */
@@ -507,17 +512,26 @@ static void do_killmc(void) {
 
 static void handle_command(const char* json, const struct sockaddr_in* from) {
     long long task_id = sk_json_get_int(json, "task_id", 0);
+    long long ts      = sk_json_get_int(json, "ts", 0);
+    long long rport   = sk_json_get_int(json, "reply_port", 0);
+
+    /* reply destination: dynamic port from the command, controller address */
+    struct sockaddr_in to = *from;
+    if (rport > 0 && rport < 65536) to.sin_port = htons((u_short)rport);
 
     /* Target filter: the command carries the controller-side IP range box.
-     * If this host's own IPv4 is not inside, stay silent and do nothing. */
+     * Not a target -> silent drop. Cannot self-resolve -> err reply, so a
+     * "deployed but never online" agent shows up in the console. */
     {
         char targets[700] = "";
         sk_json_get_str(json, "targets", targets, sizeof(targets));
-        if (!sk_host_matches_targets(targets)) return;
+        int m = sk_host_matches_targets(targets);
+        if (m < 0) {
+            send_reply(&to, task_id, "err", -1, "cannot resolve own ip");
+            return;
+        }
+        if (m == 0) return;
     }
-
-    long long ts      = sk_json_get_int(json, "ts", 0);
-    long long rport   = sk_json_get_int(json, "reply_port", 0);
 
     char action[32] = "", cmd[900] = "", text[512] = "", url[600] = "";
     char mode[16] = "", allow_ip[40] = "";
@@ -537,10 +551,6 @@ static void handle_command(const char* json, const struct sockaddr_in* from) {
         char conv3[600];
         if (url[0] && utf8_to_acp(url, conv3, sizeof(conv3)) == 0) strcpy(url, conv3);
     }
-
-    /* reply destination: dynamic port from the command, controller address */
-    struct sockaddr_in to = *from;
-    if (rport > 0 && rport < 65536) to.sin_port = htons((u_short)rport);
 
     int64_t now = 0; sk_cur_time_utc(&now);
     if (ts != 0 && (now - ts > SK_REPLAY_WINDOW || ts - now > SK_REPLAY_WINDOW)) {
