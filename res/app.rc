@@ -3,3 +3,8 @@
 #define IDI_APP_ICON 101
 
 IDI_APP_ICON ICON "app.ico"
+
+// embed the manifest: UAC elevation + DPI awareness (PerMonitorV2 + GDI Scaling)
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+#define RT_MANIFEST                        24
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"

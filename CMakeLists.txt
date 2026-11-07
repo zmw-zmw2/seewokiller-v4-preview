@@ -32,6 +32,10 @@ if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
 endif()
 
+# manifest is embedded via res/app.rc (UAC + DPI awareness);
+# suppress the linker auto-manifest or resources collide (CVT1100)
+target_link_options(${PROJECT_NAME} PRIVATE /MANIFEST:NO)
+
 # Include directories - vcpkg headers + our src
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
