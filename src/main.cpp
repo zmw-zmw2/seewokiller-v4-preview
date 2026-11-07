@@ -142,6 +142,11 @@ static HWND g_hBtnKeyExport, g_hBtnKeyImport;
 // 状态栏 + 高亮文本控件
 static HWND g_hStatusL, g_hStatusR;
 static std::string g_localIp = "0.0.0.0";
+
+// DPI-proportional layout: everything is laid out at 96 DPI and stretched
+// by g_s (= screen DPI / 96). At 100% scaling g_s==1 -> pixel-identical.
+static float g_s = 1.0f;
+static int S(int v) { return (int)(v * g_s + 0.5f); }
 static std::vector<HWND> g_accentStatics;   // section headers drawn in accent color
 static std::vector<HWND> g_statusStatics;   // status bar statics (bg = window bg)
 static std::map<HWND, bool> g_btnHover, g_btnPress;
@@ -398,9 +403,9 @@ static void SetOnlineLabel(int online) {
             fp += hexd[(g_agentKey[i] >> 4) & 0xF];
             fp += hexd[g_agentKey[i] & 0xF];
         }
-        std::string st = "\u672c\u673a: " + g_localIp + "    \u5728\u7ebf: " +
+        std::string st = "\u672c\u673a: " + g_localIp + " \u00b7 \u5728\u7ebf " +
             (online < 0 ? "--" : std::to_string(online)) +
-            "    \u5bc6\u94a5: " + fp;
+            " \u00b7 \u94a5 " + fp;
         SetWindowTextW(g_hStatusL, ToDisplayWide(st).c_str());
     }
 }
@@ -432,15 +437,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         WriteLog("Window created");
 
         // === Fonts ===
-        g_fontNormal = CreateFontW(16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+        g_fontNormal = CreateFontW(S(16), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-        g_fontBold = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+        g_fontBold = CreateFontW(S(16), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-        g_fontMono = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+        g_fontMono = CreateFontW(S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Consolas");
-        g_fontTitle = CreateFontW(24, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
+        g_fontTitle = CreateFontW(S(24), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-        g_fontSmall = CreateFontW(13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+        g_fontSmall = CreateFontW(S(13), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
 
         // === Brushes ===
@@ -483,7 +488,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         };
 
         // === 目标主机 ===
-        sectionHeader(L"\u76ee\u6807\u4e3b\u673a");
+        sectionHeader(L"\u76ee\u6807");
         g_hEditIP = CreateWindowW(L"EDIT", L"172.16.20.6-12",
             WS_VISIBLE | WS_CHILD | WS_BORDER | ES_MULTILINE | WS_VSCROLL | ES_AUTOVSCROLL,
             M, y, W, g_hIP, hwnd, (HMENU)IDC_EDIT_IP, GetModuleHandle(nullptr), nullptr);
@@ -492,7 +497,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         y += g_hIP + LAYOUT_SECTION_GAP;
 
         // === 连接配置 ===
-        sectionHeader(L"\u8fde\u63a5\u914d\u7f6e");
+        sectionHeader(L"\u8fde\u63a5");
         {
             HWND hLbl;
             auto fieldLabel = [&](int col, const wchar_t* text) {
@@ -501,9 +506,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
             };
             fieldLabel(0,   L"\u7528\u6237\u540d");
-            fieldLabel(140, L"\u7ba1\u7406\u5458\u5bc6\u7801");
+            fieldLabel(140, L"\u5bc6\u7801");
             fieldLabel(290, L"\u5ef6\u8fdf(\u79d2)");
-            fieldLabel(400, L"\u5faa\u73af\u95f4\u9694(\u79d2)");
+            fieldLabel(400, L"\u95f4\u9694(\u79d2)");
             y += 24;
 
             g_hEditUser = CreateWindowW(L"EDIT", L"seewo",
@@ -536,7 +541,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // === Mode Tab Control ===
         g_yTab = y;
-        const int TAB_H = 270;  // enough for the larger "Command" tab content
+        const int TAB_H = S(270);  // enough for the larger "Command" tab content
         g_hTab = CreateWindowW(WC_TABCONTROLW, L"",
             WS_VISIBLE | WS_CHILD | TCS_OWNERDRAWFIXED | TCS_TABS,
             M, y, W, TAB_H, hwnd, (HMENU)IDC_TAB_MAIN, GetModuleHandle(nullptr), nullptr);
@@ -546,11 +551,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // Use the explicit Unicode message to avoid ANSI/Unicode macro confusion.
         TCITEMW tci = { TCIF_TEXT };
-        tci.pszText = (LPWSTR)L"\u547d\u4ee4\u6267\u884c";
+        tci.pszText = (LPWSTR)L"\u547d\u4ee4";
         SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&tci);
-        tci.pszText = (LPWSTR)L"\u6587\u4ef6\u4f20\u8f93";
+        tci.pszText = (LPWSTR)L"\u4f20\u8f93";
         SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&tci);
-        tci.pszText = (LPWSTR)L"Agent\u5206\u53d1";
+        tci.pszText = (LPWSTR)L"\u5206\u53d1";
         SendMessageW(g_hTab, TCM_INSERTITEMW, 2, (LPARAM)&tci);
 
         // Compute tab content area in parent coordinates.
@@ -565,7 +570,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // === Command Tab Content ===
         {
-            HWND hLbl = CreateWindowW(L"STATIC", L"\u5feb\u6377\u547d\u4ee4\uff08\u63d2\u4ef6\uff09",
+            HWND hLbl = CreateWindowW(L"STATIC", L"\u5feb\u6377\u547d\u4ee4",
                 WS_VISIBLE | WS_CHILD, cx, cy, contentW, 22, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
@@ -590,7 +595,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             cy += btnH + 16;
 
-            hLbl = CreateWindowW(L"STATIC", L"\u81ea\u5b9a\u4e49\u547d\u4ee4",
+            hLbl = CreateWindowW(L"STATIC", L"\u81ea\u5b9a\u4e49",
                 WS_VISIBLE | WS_CHILD, cx, cy, contentW, 22, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
@@ -604,7 +609,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessage(g_hEditCommand, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
             g_cmdTabControls.push_back(g_hEditCommand);
             g_yCmd = cy;
-            g_hBtnExecute = CreateWindowW(L"BUTTON", L"\u5f00\u59cb\u6267\u884c",
+            g_hBtnExecute = CreateWindowW(L"BUTTON", L"\u6267\u884c",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 110, cy, 110, g_hCmd, hwnd, (HMENU)IDC_BTN_EXECUTE,
                 GetModuleHandle(nullptr), nullptr);
@@ -616,7 +621,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         {
             HWND hLbl;
             // 本地路径 row
-            hLbl = CreateWindowW(L"STATIC", L"\u672c\u5730\u8def\u5f84",
+            hLbl = CreateWindowW(L"STATIC", L"\u672c\u5730",
                 WS_VISIBLE | WS_CHILD, cx, contentY + 6, 120, 20,
                 hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
@@ -630,7 +635,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessage(g_hEditScpLocal, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
             g_scpTabControls.push_back(g_hEditScpLocal);
             g_yScpLocal = scy;
-            g_hBtnScpBrowse = CreateWindowW(L"BUTTON", L"\u6d4f\u89c8...",
+            g_hBtnScpBrowse = CreateWindowW(L"BUTTON", L"\u6d4f\u89c8",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 90, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_BROWSE,
                 GetModuleHandle(nullptr), nullptr);
@@ -638,7 +643,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_scpTabControls.push_back(g_hBtnScpBrowse);
 
             scy += LAYOUT_INPUT_H + 12;
-            hLbl = CreateWindowW(L"STATIC", L"\u8fdc\u7a0b\u8def\u5f84",
+            hLbl = CreateWindowW(L"STATIC", L"\u8fdc\u7a0b",
                 WS_VISIBLE | WS_CHILD, cx, scy, 120, 20, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
@@ -652,19 +657,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessage(g_hEditScpRemote, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
             g_scpTabControls.push_back(g_hEditScpRemote);
             g_yScpRemote = scy;
-            g_hBtnScpPush = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20\u5230\u5168\u90e8",
+            g_hBtnScpPush = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 306, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PUSH,
                 GetModuleHandle(nullptr), nullptr);
             MakeHoverButton(g_hBtnScpPush);
             g_scpTabControls.push_back(g_hBtnScpPush);
-            g_hBtnScpPull = CreateWindowW(L"BUTTON", L"\u4ece\u9996\u53f0\u62c9\u53d6",
+            g_hBtnScpPull = CreateWindowW(L"BUTTON", L"\u62c9\u53d6",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 206, scy, 90, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_PULL,
                 GetModuleHandle(nullptr), nullptr);
             MakeHoverButton(g_hBtnScpPull);
             g_scpTabControls.push_back(g_hBtnScpPull);
-            g_hBtnScpRun = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20\u5e76\u8fd0\u884c",
+            g_hBtnScpRun = CreateWindowW(L"BUTTON", L"\u4e0a\u4f20\u8fd0\u884c",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + contentW - 106, scy, 100, LAYOUT_INPUT_H, hwnd, (HMENU)IDC_BTN_SCP_RUN,
                 GetModuleHandle(nullptr), nullptr);
@@ -672,7 +677,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_scpTabControls.push_back(g_hBtnScpRun);
 
             scy += LAYOUT_INPUT_H + 8;
-            hLbl = CreateWindowW(L"STATIC", L"\u62c9\u53d6\uff1a\u4efb\u610f\u4e00\u53f0\u6210\u529f\u5373\u505c\u6b62",
+            hLbl = CreateWindowW(L"STATIC", L"\u9996\u53f0\u6210\u529f\u5373\u505c",
                 WS_VISIBLE | WS_CHILD, cx, scy, contentW, 18, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
@@ -683,7 +688,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         {
             g_yAgentRow = contentY;
             int ay = contentY + 6;
-            g_hBtnAgentDeploy = CreateWindowW(L"BUTTON", L"\u4e00\u952e\u90e8\u7f72\u5230\u5168\u90e8",
+            g_hBtnAgentDeploy = CreateWindowW(L"BUTTON", L"\u90e8\u7f72",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx, ay, 150, 34, hwnd, (HMENU)IDC_BTN_AGENT_DEPLOY,
                 GetModuleHandle(nullptr), nullptr);
@@ -697,7 +702,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_accentStatics.push_back(g_hLblAgentOnline);
             g_agentTabControls.push_back(g_hLblAgentOnline);
 
-            g_hBtnAgentPing = CreateWindowW(L"BUTTON", L"\u5237\u65b0\u5728\u7ebf",
+            g_hBtnAgentPing = CreateWindowW(L"BUTTON", L"\u5728\u7ebf",
                 WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                 cx + 300, ay, 100, 30, hwnd, (HMENU)IDC_BTN_AGENT_PING,
                 GetModuleHandle(nullptr), nullptr);
@@ -735,19 +740,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessage(g_hCmbAgentAction, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
             {
                 const wchar_t* items[] = {
-                    L"exec \u6267\u884c\u547d\u4ee4",
-                    L"exec_wait \u53d6\u7ed3\u679c",
-                    L"killmc \u6740Java/MC",
-                    L"msg \u5f39\u516c\u544a",
-                    L"open_url \u5f00\u7f51\u9875",
-                    L"power \u5173\u673a",
-                    L"power \u91cd\u542f",
-                    L"power \u6ce8\u9500",
-                    L"power \u9501\u5c4f",
-                    L"isolate \u7f51\u7edc\u9694\u79bb",
-                    L"unisolate \u89e3\u9664\u9694\u79bb",
-                    L"lockinput \u7981\u7528\u952e\u9f20",
-                    L"unlockinput \u89e3\u9664\u7981\u7528"
+                    L"\u6267\u884c",
+                    L"\u6267\u884c(\u7b49\u7ed3\u679c)",
+                    L"\u6740Java",
+                    L"\u5f39\u516c\u544a",
+                    L"\u5f00\u7f51\u9875",
+                    L"\u5173\u673a",
+                    L"\u91cd\u542f",
+                    L"\u6ce8\u9500",
+                    L"\u9501\u5c4f",
+                    L"\u9694\u79bb",
+                    L"\u89e3\u9664\u9694\u79bb",
+                    L"\u7981\u952e\u9f20",
+                    L"\u89e3\u7981"
                 };
                 for (const wchar_t* it : items)
                     SendMessageW(g_hCmbAgentAction, CB_ADDSTRING, 0, (LPARAM)it);
@@ -776,7 +781,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_agentTabControls.push_back(g_hBtnAgentSend);
 
             hLbl = CreateWindowW(L"STATIC",
-                L"\u53c2\u6570: exec/exec_wait=\u547d\u4ee4, msg=\u6587\u5b57, open_url=\u7f51\u5740, \u5176\u4f59\u7559\u7a7a; \u6240\u6709\u52a8\u4f5c\u4ec5\u5bf9\u4e0a\u65b9IP\u8303\u56f4\u5185\u7684\u4e3b\u673a\u751f\u6548, \u56de\u6267\u663e\u793a\u5728\u4e0b\u65b9\u8f93\u51fa\u533a",
+                L"exec/wait/msg/url \u624d\u9700\u53c2\u6570, \u5176\u4f59\u514d\u586b; \u4ec5\u5bf9\u4e0a\u65b9IP\u6bb5\u751f\u6548",
                 WS_VISIBLE | WS_CHILD, cx, contentY + 92, contentW, 18, hwnd, nullptr,
                 GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
@@ -800,7 +805,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // === 执行输出 (RichEdit: colored per-line log) ===
         {
-            HWND hLbl = CreateWindowW(L"STATIC", L"\u6267\u884c\u8f93\u51fa",
+            HWND hLbl = CreateWindowW(L"STATIC", L"\u8f93\u51fa",
                 WS_VISIBLE | WS_CHILD, M, y, 120, 20, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
             SendMessage(hLbl, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
             g_accentStatics.push_back(hLbl);
@@ -813,12 +818,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             M, y, W, 180, hwnd, (HMENU)IDC_EDIT_OUTPUT, GetModuleHandle(nullptr), nullptr);
         // RichEdit ignores the window name at creation, set text explicitly.
         SetWindowTextW(g_hEditOutput,
-            L"Seewo Killer v4\r\n\r\n"
-            L"\u4f7f\u7528\u8bf4\u660e\uff1a\r\n"
-            L"* \u9876\u90e8\uff1aIP\u8303\u56f4\u3001\u7528\u6237\u540d\u3001\u5bc6\u7801\u3001\u5ef6\u8fdf/\u5faa\u73af\u914d\u7f6e\r\n"
-            L"* \u547d\u4ee4\u6267\u884c Tab\uff1a\u70b9\u51fb\u63d2\u4ef6\u6309\u94ae\u586b\u5145\u547d\u4ee4\uff0c\u6216\u5728\u4e0b\u65b9\u8f93\u5165\u81ea\u5b9a\u4e49\u547d\u4ee4\r\n"
-            L"* \u6587\u4ef6\u4f20\u8f93 Tab\uff1aSCP \u4e0a\u4f20\u5230\u6240\u6709\u76ee\u6807\uff0c\u6216\u4ece\u9996\u53f0\u6210\u529f\u673a\u5668\u62c9\u53d6\r\n"
-            L"* Agent\u5206\u53d1 Tab\uff1a\u7ec4\u64ad\u4ec5\u5bf9IP\u8303\u56f4\u5185\u7684\u4e3b\u673a\u751f\u6548\r\n");
+            L"SeewoKiller v4\r\n"
+            L"IP\u8303\u56f4+\u5bc6\u7801 \u2192 \u547d\u4ee4\u6267\u884c / Agent\u5206\u53d1\r\n");
         SetWindowSubclass(g_hEditOutput, OutputSubclassProc, 0, 0);
         SendMessage(g_hEditOutput, EM_SETBKCOLOR, 0, CLR_INPUT_BG);
         SendMessage(g_hEditOutput, EM_EXLIMITTEXT, 0, 0x7FFFFFF0);
@@ -847,7 +848,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessage(g_hStatusR, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
             g_statusStatics.push_back(g_hStatusR);
 
-            std::string st = "\u672c\u673a: " + g_localIp + "    \u5728\u7ebf: --";
+            std::string st = "\u672c\u673a: " + g_localIp + " \u00b7 \u5728\u7ebf --";
             SetWindowTextW(g_hStatusL, ToDisplayWide(st).c_str());
         }
 
@@ -1433,7 +1434,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             if (g_sshExecutor && g_sshExecutor->isRunning()) {
                 g_sshExecutor->stopLoop();
-                SetWindowTextW(g_hBtnExecute, L"\u5f00\u59cb\u6267\u884c");
+                SetWindowTextW(g_hBtnExecute, L"\u6267\u884c");
                 return 0;
             }
 
@@ -1519,7 +1520,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int progress = (int)wParam;
         SendMessage(g_hProgress, PBM_SETPOS, progress, 0);
         if (progress >= 100) {
-            SetWindowTextW(g_hBtnExecute, L"\u5f00\u59cb\u6267\u884c");
+            SetWindowTextW(g_hBtnExecute, L"\u6267\u884c");
         }
         return 0;
     }
@@ -1565,14 +1566,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_OP_DONE: {
         g_opBusy.store(false);
         if (g_hBtnAgentDeploy)
-            SetWindowTextW(g_hBtnAgentDeploy, L"\u4e00\u952e\u90e8\u7f72\u5230\u5168\u90e8");
+            SetWindowTextW(g_hBtnAgentDeploy, L"\u90e8\u7f72");
         return 0;
     }
 
     case WM_GETMINMAXINFO: {
         LPMINMAXINFO mmi = (LPMINMAXINFO)lParam;
-        mmi->ptMinTrackSize.x = 720;
-        mmi->ptMinTrackSize.y = 620;
+        mmi->ptMinTrackSize.x = S(720);
+        mmi->ptMinTrackSize.y = S(620);
         return 0;
     }
 
@@ -1581,15 +1582,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         GetClientRect(hwnd, &cr);
         int clientW = cr.right - cr.left;
         int clientH = cr.bottom - cr.top;
-        const int M = LAYOUT_MARGIN;
-        int W = (std::max)(100, clientW - 2 * M);
+        const int M = S(LAYOUT_MARGIN);
+        int W = (std::max)(S(100), clientW - 2 * M);
 
         if (g_hEditIP)
-            SetWindowPos(g_hEditIP, nullptr, M, g_yIP, W, g_hIP, SWP_NOZORDER);
+            SetWindowPos(g_hEditIP, nullptr, M, g_yIP, W, S(g_hIP), SWP_NOZORDER);
 
         if (g_hTab) {
-            SetWindowPos(g_hTab, nullptr, M, g_yTab, W, 230, SWP_NOZORDER);
-            TabCtrl_SetItemSize(g_hTab, (W - 6) / 3, 28);
+            SetWindowPos(g_hTab, nullptr, M, g_yTab, W, S(230), SWP_NOZORDER);
+            TabCtrl_SetItemSize(g_hTab, (W - 6) / 3, S(28));
 
             // Recompute tab content area after horizontal resize.
             RECT tcRc;
@@ -1599,44 +1600,44 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int cw = tcRc.right - tcRc.left;
 
             if (g_hEditCommand)
-                SetWindowPos(g_hEditCommand, nullptr, cx, g_yCmd, cw - 118, g_hCmd, SWP_NOZORDER);
+                SetWindowPos(g_hEditCommand, nullptr, cx, g_yCmd, cw - S(118), S(g_hCmd), SWP_NOZORDER);
             if (g_hBtnExecute)
-                SetWindowPos(g_hBtnExecute, nullptr, cx + cw - 110, g_yCmd, 110, g_hCmd, SWP_NOZORDER);
+                SetWindowPos(g_hBtnExecute, nullptr, cx + cw - S(110), g_yCmd, S(110), S(g_hCmd), SWP_NOZORDER);
 
             if (g_hEditScpLocal)
-                SetWindowPos(g_hEditScpLocal, nullptr, cx, g_yScpLocal, cw - 98, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hEditScpLocal, nullptr, cx, g_yScpLocal, cw - S(98), S(LAYOUT_INPUT_H), SWP_NOZORDER);
             if (g_hBtnScpBrowse)
-                SetWindowPos(g_hBtnScpBrowse, nullptr, cx + cw - 90, g_yScpLocal, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnScpBrowse, nullptr, cx + cw - S(90), g_yScpLocal, S(90), S(LAYOUT_INPUT_H), SWP_NOZORDER);
             if (g_hEditScpRemote)
-                SetWindowPos(g_hEditScpRemote, nullptr, cx, g_yScpRemote, cw - 310, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hEditScpRemote, nullptr, cx, g_yScpRemote, cw - S(310), S(LAYOUT_INPUT_H), SWP_NOZORDER);
             if (g_hBtnScpPush)
-                SetWindowPos(g_hBtnScpPush, nullptr, cx + cw - 306, g_yScpRemote, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnScpPush, nullptr, cx + cw - S(306), g_yScpRemote, S(90), S(LAYOUT_INPUT_H), SWP_NOZORDER);
             if (g_hBtnScpPull)
-                SetWindowPos(g_hBtnScpPull, nullptr, cx + cw - 206, g_yScpRemote, 90, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnScpPull, nullptr, cx + cw - S(206), g_yScpRemote, S(90), S(LAYOUT_INPUT_H), SWP_NOZORDER);
             if (g_hBtnScpRun)
-                SetWindowPos(g_hBtnScpRun, nullptr, cx + cw - 106, g_yScpRemote, 100, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnScpRun, nullptr, cx + cw - S(106), g_yScpRemote, S(100), S(LAYOUT_INPUT_H), SWP_NOZORDER);
 
             if (g_hCmbAgentAction)
-                SetWindowPos(g_hCmbAgentAction, nullptr, cx + 46, g_yAgentRow + 50, 150, 300, SWP_NOZORDER);
+                SetWindowPos(g_hCmbAgentAction, nullptr, cx + S(46), g_yAgentRow + S(50), S(150), S(300), SWP_NOZORDER);
             if (g_hEditAgentParam)
-                SetWindowPos(g_hEditAgentParam, nullptr, cx + 250, g_yAgentRow + 50, cw - 332, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hEditAgentParam, nullptr, cx + S(250), g_yAgentRow + S(50), cw - S(332), S(LAYOUT_INPUT_H), SWP_NOZORDER);
             if (g_hBtnAgentSend)
-                SetWindowPos(g_hBtnAgentSend, nullptr, cx + cw - 74, g_yAgentRow + 50, 74, LAYOUT_INPUT_H, SWP_NOZORDER);
+                SetWindowPos(g_hBtnAgentSend, nullptr, cx + cw - S(74), g_yAgentRow + S(50), S(74), S(LAYOUT_INPUT_H), SWP_NOZORDER);
         }
 
         if (g_hProgress)
-            SetWindowPos(g_hProgress, nullptr, M, g_yProg, W, 8, SWP_NOZORDER);
+            SetWindowPos(g_hProgress, nullptr, M, g_yProg, W, S(8), SWP_NOZORDER);
 
         if (g_hEditOutput) {
-            int outH = (std::max)(120, clientH - g_yOutput - 36);
+            int outH = (std::max)(S(120), clientH - g_yOutput - S(36));
             SetWindowPos(g_hEditOutput, nullptr, M, g_yOutput, W, outH, SWP_NOZORDER);
         }
 
         if (g_hStatusL)
-            SetWindowPos(g_hStatusL, nullptr, M, clientH - 26, clientW / 2 - M, 22, SWP_NOZORDER);
+            SetWindowPos(g_hStatusL, nullptr, M, clientH - S(26), clientW / 2 - M, S(22), SWP_NOZORDER);
         if (g_hStatusR)
-            SetWindowPos(g_hStatusR, nullptr, clientW / 2, clientH - 26,
-                         clientW - clientW / 2 - M, 22, SWP_NOZORDER);
+            SetWindowPos(g_hStatusR, nullptr, clientW / 2, clientH - S(26),
+                         clientW - clientW / 2 - M, S(22), SWP_NOZORDER);
 
         return 0;
     }
@@ -1764,21 +1765,26 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         wc.style = CS_HREDRAW | CS_VREDRAW;
         RegisterClassW(&wc);
 
+        // DPI-proportional layout: the whole UI is designed at 96 DPI and
+        // stretched by g_s (PerMonitorV2 manifest makes this the real DPI)
+        UINT sysDpi = GetDpiForSystem();
+        g_s = (sysDpi >= 96) ? (sysDpi / 96.0f) : 1.0f;
+
         // Estimate client height so the window fits the whole layout. Mirrors
         // WM_CREATE geometry; the flexible output area absorbs any small error.
         {
-            int h = 52;                                          // below title
-            h += 24 + 8 + 90 + LAYOUT_SECTION_GAP;               // 目标主机
-            h += 24 + LAYOUT_INPUT_H + LAYOUT_SECTION_GAP;       // 连接配置
-            h += 270 + LAYOUT_SECTION_GAP;                       // 命令/传输/Agent Tab 控件
-            h += 8 + 10;                                         // progress + gap
-            h += 24 + 180;                                       // 执行输出 label + output
-            h += 26;                                             // status bar
-            int clientH = h + 12;
-            int winH = clientH + 46;                             // title bar + borders
+            int h = S(52);                                       // below title
+            h += S(24) + S(8) + S(90) + S(LAYOUT_SECTION_GAP);   // 目标主机
+            h += S(24) + S(LAYOUT_INPUT_H) + S(LAYOUT_SECTION_GAP); // 连接配置
+            h += S(270) + S(LAYOUT_SECTION_GAP);                 // 命令/传输/Agent Tab 控件
+            h += S(8) + S(10);                                   // progress + gap
+            h += S(24) + S(180);                                 // 执行输出 label + output
+            h += S(26);                                          // status bar
+            int clientH = h + S(12);
+            int winH = clientH + S(46);                          // title bar + borders
             g_hMainWnd = CreateWindowExW(0, CLASS_NAME, L"Seewo Killer",
                 WS_OVERLAPPEDWINDOW | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME,
-                CW_USEDEFAULT, CW_USEDEFAULT, 760, winH,
+                CW_USEDEFAULT, CW_USEDEFAULT, S(760), winH,
                 nullptr, nullptr, hInst, nullptr);
         }
 
@@ -1787,6 +1793,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             WSACleanup();
             return 1;
         }
+
+        // one-time stretch of the whole 96-DPI layout to the screen scale
+        EnumChildWindows(g_hMainWnd, [](HWND h, LPARAM lp) -> BOOL {
+            HWND parent = (HWND)lp;
+            RECT rc;
+            GetWindowRect(h, &rc);
+            MapWindowPoints(nullptr, parent, (POINT*)&rc, 2);
+            SetWindowPos(h, nullptr,
+                (int)(rc.left * g_s + 0.5f), (int)(rc.top * g_s + 0.5f),
+                (int)((rc.right - rc.left) * g_s + 0.5f),
+                (int)((rc.bottom - rc.top) * g_s + 0.5f),
+                SWP_NOZORDER | SWP_NOACTIVATE);
+            return TRUE;
+        }, (LPARAM)g_hMainWnd);
+        g_yIP = S(g_yIP); g_yCmd = S(g_yCmd); g_yScpLocal = S(g_yScpLocal);
+        g_yScpRemote = S(g_yScpRemote); g_yProg = S(g_yProg); g_yOutput = S(g_yOutput);
+        g_yAgentRow = S(g_yAgentRow); g_yTab = S(g_yTab);
 
         ShowWindow(g_hMainWnd, nCmdShow);
         UpdateWindow(g_hMainWnd);
