@@ -11,11 +11,10 @@ struct SelfProtectReport {
     bool block445 = false;
     bool allowSelf = false;     // inbound allow rule for this exe (receipt wall)
     bool sshdDisabled = false;
-    bool slotArmed = false;     // far-future shutdown slot occupied
+    bool rpcBlocked = false;    // inbound RPC 135 blocked (kills remote WMI/shutdown)
 
     std::string text() const;
 };
 
 bool SelfProtect_IsElevated();
 SelfProtectReport SelfProtect_Run();   // blocking, takes a few seconds
-void SelfProtect_DisarmShutdownSlot(); // shutdown /a

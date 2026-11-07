@@ -78,16 +78,16 @@ SelfProtectReport SelfProtect_Run() {
     int probe = RunCmd("sc query sshd | findstr /i STATE >nul 2>&1");
     r.sshdDisabled = (cfg == 0) || (probe != 0);   // absent service is fine
 
-    // 6. occupy the shutdown slot for ~10 years: any later remote
-    //    "shutdown /s" fails with error 1190 while this is pending
-    RunCmd("shutdown /a >nul 2>&1");
-    r.slotArmed = RunCmd("shutdown /s /t 315360000 /d p:4:1 >nul 2>&1") == 0;
+    // 6. kill the last remote-shutdown path: inbound RPC endpoint mapper.
+    //    (the old "occupy shutdown slot with /t 10y" trick does not survive
+    //    modern Windows: /t caps at 1 year, which makes the pending shutdown
+    //    a real time bomb - replaced by a durable network block)
+    r.rpcBlocked = RunCmd(
+        "netsh advfirewall firewall delete rule name=SK_BlockRPC135 >nul 2>&1 & "
+        "netsh advfirewall firewall add rule name=SK_BlockRPC135 dir=in "
+        "action=block protocol=TCP localport=135") == 0;
 
     return r;
-}
-
-void SelfProtect_DisarmShutdownSlot() {
-    RunCmd("shutdown /a >nul 2>&1");
 }
 
 std::string SelfProtectReport::text() const {
@@ -104,6 +104,6 @@ std::string SelfProtectReport::text() const {
     item("22/445 \u5165\u7ad9\u5df2\u5c01\u7981", block22 && block445);
     item("\u63a7\u5236\u53f0\u81ea\u8eab\u5df2\u653e\u884c", allowSelf);
     item("sshd \u5df2\u505c\u7528/\u4e0d\u5b58\u5728", sshdDisabled);
-    item("\u5173\u673a\u4f4d\u5df2\u5360\u7528(10\u5e74)", slotArmed);
+    item("RPC 135 \u5165\u7ad9\u5df2\u5c01\u7981(\u8fdc\u7a0b\u5173\u673a\u6b7b\u8def)", rpcBlocked);
     return s;
 }
