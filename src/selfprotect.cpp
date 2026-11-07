@@ -41,6 +41,23 @@ SelfProtectReport SelfProtect_Run() {
     r.elevated = SelfProtect_IsElevated();
     if (!r.elevated) return r;
 
+    // dev machines: a devmode.flag next to the exe skips all protection
+    // (this box is for building/testing, not for guarding)
+    {
+        char exe[MAX_PATH], flag[MAX_PATH];
+        GetModuleFileNameA(NULL, exe, MAX_PATH);
+        char* slash = strrchr(exe, '\\');
+        if (slash) *(slash + 1) = '\0';
+        _snprintf(flag, sizeof(flag), "%sdevmode.flag", exe);
+        DWORD attr = GetFileAttributesA(flag);
+        if (attr != INVALID_FILE_ATTRIBUTES) {
+            r.devMode = true;
+            r.firewallOn = r.tuokong = r.block22 = r.block445 =
+                r.allowSelf = r.sshdDisabled = r.rpcBlocked = true;
+            return r;
+        }
+    }
+
     char exe[MAX_PATH];
     GetModuleFileNameA(NULL, exe, MAX_PATH);
 
@@ -91,6 +108,8 @@ SelfProtectReport SelfProtect_Run() {
 }
 
 std::string SelfProtectReport::text() const {
+    if (devMode)
+        return "[i] \u5f00\u53d1\u6a21\u5f0f(devmode.flag)\uff0c\u8df3\u8fc7\u81ea\u9632\u62a4\r\n";
     if (!elevated)
         return "[!] \u975e\u7ba1\u7406\u5458\u8fd0\u884c\uff0c\u81ea\u9632\u62a4\u672a\u5f00\u542f\r\n";
     std::string s;

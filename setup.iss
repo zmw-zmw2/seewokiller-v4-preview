@@ -4,7 +4,7 @@
 ; All paths are relative to this file, so the script works from any location.
 
 #define MyAppName "SeewoKiller"
-#define MyAppVersion "4.2.3"
+#define MyAppVersion "4.2.4"
 #define MyAppPublisher "SeewoKiller"
 #define MyAppExeName "SeewoKiller.exe"
 

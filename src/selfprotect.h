@@ -12,6 +12,7 @@ struct SelfProtectReport {
     bool allowSelf = false;     // inbound allow rule for this exe (receipt wall)
     bool sshdDisabled = false;
     bool rpcBlocked = false;    // inbound RPC 135 blocked (kills remote WMI/shutdown)
+    bool devMode = false;       // devmode.flag present: protection skipped
 
     std::string text() const;
 };
